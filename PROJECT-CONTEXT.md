@@ -1574,3 +1574,16 @@ Two packaged-archive uploads timed out at the external blob endpoint; supported
 source-build fallback saved version112 and deployment was dispatched. Record its
 terminal outcome before claiming public-site completion. Evidence Operations
 .codex-artifacts/2026-10-25-dashboard-replay/production-verification.json and screenshots.
+
+
+Replay rollout completed: source-build fallback successfully published Site version112
+(deploymentappgdep_6ade17f2f4a88191b9e305d38f0afa25). Authenticated public custom-domain
+verification passed HTML/assets, recording list, reconstructed historical state,
+explicit gap state and POST405 rejection. Final JS SHA256
+1652b21c83efff1f4cedb54aa015e695d17a1e1ef061c992649d27c558a23a56.
+Empty-image copy is historical in Replay and restores live wording on exit.
+Production also replayed a22568-byte archived JPEG from an older simulation.
+Original October24 recording's nine files independently matched the pre-replay copy;
+recorder remained connected/armed, NINA stopped. Final user entry: refresh
+https://starfront.thewcl.com/dashboard/ → Recordings → October24,20:09Central.
+Replay feature commit745508a follows the pushed baseline58db473.

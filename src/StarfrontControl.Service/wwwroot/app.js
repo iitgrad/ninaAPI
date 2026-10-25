@@ -32697,6 +32697,10 @@ document.addEventListener("visibilitychange", updateClock);
 function render() {
   const states = current?.snapshot?.states ?? {}, live = replayMode ? !!replayFrame && !replayFrame.gap : preview || fresh();
   renderDashboard(states, live, current?.snapshot?.sessionId ?? "", replayMode ? replayFrame?.at : undefined);
+  const empty = el3("image-empty");
+  empty.querySelector("strong").textContent = replayMode ? "No recorded image" : "Waiting for an image";
+  empty.querySelector("span").textContent = replayMode ? "No image preview was recorded at this time." : "The next image preview will appear here.";
+  el3("latest-preview").alt = replayMode ? "Recorded image preview" : "Latest image from N.I.N.A.";
   const app = topic("application"), diagnostic = topic("diagnostics");
   write("environment", preview ? "Illustrative preview" : app.environment === "simulation" ? "Simulation" : app.environment === "equipment" ? "Equipment" : "Environment unknown");
   write("api-version", "Starfront Control");
