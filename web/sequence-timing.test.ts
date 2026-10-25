@@ -1,0 +1,2 @@
+import {test,expect} from 'bun:test';import {stepTiming} from './sequence-timing';
+test('receipt times in site time zone with honest unknowns',()=>{expect(stepTiming(undefined)).toBeNull();expect(stepTiming({startedAt:'garbage'})).toBeNull();expect(stepTiming({source:'gateway-received',startedAt:'2026-10-25T01:09:23Z',endedAt:'2026-10-25T01:09:25Z'})?.text).toBe('Start 20:09:23 · End 20:09:25');expect(stepTiming({seenActiveAt:'2026-10-25T01:09:23Z'})?.text).toBe('Seen 20:09:23');expect(stepTiming({endedAt:'2026-10-25T01:09:25Z'})?.text).toBe('End 20:09:25');});

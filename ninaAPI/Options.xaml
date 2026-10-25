@@ -1,4 +1,4 @@
-﻿<!--
+<!--
     Copyright © 2025 Christian Palm (christian@palm-family.de)
     This Source Code Form is subject to the terms of the Mozilla Public
     License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -10,7 +10,7 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
-    <DataTemplate x:Key="Advanced API_Options">
+    <DataTemplate x:Key="Starfront Control_Options">
         <StackPanel Orientation="Vertical">
 
             <StackPanel Orientation="Horizontal">

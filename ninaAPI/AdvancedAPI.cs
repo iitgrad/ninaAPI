@@ -36,6 +36,7 @@ using NINA.WPF.Base.Interfaces.ViewModel;
 using ninaAPI.Utility;
 using ninaAPI.WebService;
 using Settings = ninaAPI.Properties.Settings;
+using ninaAPI.Control;
 
 namespace ninaAPI
 {
@@ -84,7 +85,7 @@ namespace ninaAPI
                            IWindowServiceFactory windowFactory)
         {
 #if WINDOWS
-            Application.Current.Resources.MergedDictionaries.Add(new ResourceDictionary() { Source = new Uri("pack://application:,,,/ninaAPI;component/WebService/V2/CustomDrivers/RotatorDataTemplate.xaml") });
+            Application.Current.Resources.MergedDictionaries.Add(new ResourceDictionary() { Source = new Uri("pack://application:,,,/StarfrontControl;component/WebService/V2/CustomDrivers/RotatorDataTemplate.xaml") });
 #endif
             PluginId = this.Identifier;
             instance = this;
@@ -128,6 +129,8 @@ namespace ninaAPI
             }
 
             PluginSettings = new PluginOptionsAccessor(Controls.Profile, Guid.Parse(this.Identifier));
+            var controlConfiguration = ControlConfiguration.Load();
+            Settings.Default.APIEnabled = controlConfiguration.Enabled;
             Controls.Profile.ProfileChanged += ProfileChanged;
 
             UpdateDefaultPortCommand = new CommunityToolkit.Mvvm.Input.RelayCommand(() =>
@@ -147,7 +150,7 @@ namespace ninaAPI
             communicator = new Communicator();
 
             SetHostNames();
-            API.StartWatchers();
+            if (controlConfiguration.EnableLegacyApi) API.StartWatchers();
         }
 
         private void ProfileChanged(object sender, EventArgs e)
@@ -165,12 +168,13 @@ namespace ninaAPI
         {
             if (CachedPort != Port)
             {
-                Notification.ShowInformation("Advanced API launched on a different port: " + CachedPort);
+                Notification.ShowInformation("Starfront Control launched on a different port: " + CachedPort);
             }
         }
 
         public override Task Teardown()
         {
+            Controls.Profile.ProfileChanged -= ProfileChanged;
             Server?.Stop();
             Server = null;
 
@@ -259,7 +263,12 @@ namespace ninaAPI
             set
             {
                 Settings.Default.APIEnabled = value;
+                var configuration = ControlConfiguration.Load();
+                configuration.Enabled = value;
+                configuration.Save();
                 CoreUtil.SaveSettings(Settings.Default);
+                Server?.Stop();
+                Server = null;
                 if (value)
                 {
                     CachedPort = CoreUtility.GetNearestAvailablePort(Port);
@@ -270,7 +279,7 @@ namespace ninaAPI
                 }
                 else
                 {
-                    Server.Stop();
+                    Server?.Stop();
                     Server = null;
                     CachedPort = -1;
                     Notification.ShowSuccess("API successfully stopped");

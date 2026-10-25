@@ -40,7 +40,7 @@ namespace ninaAPI.WebService.V2.CustomDrivers
     [Export(typeof(IEquipmentProvider))]
     public class NetworkedFilterWheelProvider : IEquipmentProvider<IFilterWheel>
     {
-        public string Name => "Networked Filter Wheel";
+        public string Name => "Starfront Networked Filter Wheel";
 
         public IList<IFilterWheel> GetEquipment()
         {
@@ -63,7 +63,7 @@ namespace ninaAPI.WebService.V2.CustomDrivers
 
         private bool connected;
 
-        public string Category { get; } = "Advanced API";
+        public string Category { get; } = "Starfront Control";
 
         public bool Connected
         {
@@ -117,10 +117,10 @@ namespace ninaAPI.WebService.V2.CustomDrivers
 
         public bool HasSetupDialog => false;
 
-        public string Id => "Networked Filter Wheel";
+        public string Id => "StarfrontControl.NetworkedFilterWheel";
 
-        public string Name => "Networked Filter Wheel";
-        public string DisplayName => "Networked Filter Wheel";
+        public string Name => "Starfront Networked Filter Wheel";
+        public string DisplayName => "Starfront Networked Filter Wheel";
 
         public Task<bool> Connect(CancellationToken token)
         {
@@ -169,6 +169,13 @@ namespace ninaAPI.WebService.V2.CustomDrivers
         public NetworkedFilterWheelSocket(string urlPath) : base(urlPath, true)
         {
             NetworkedFilterWheel.FilterChangeRequested += NetworkedFilterWheel_FilterChangeRequested;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+                NetworkedFilterWheel.FilterChangeRequested -= NetworkedFilterWheel_FilterChangeRequested;
+            base.Dispose(disposing);
         }
 
         private void NetworkedFilterWheel_FilterChangeRequested(object sender, string filter)

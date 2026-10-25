@@ -22,6 +22,7 @@ using System.Collections.Generic;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using ninaAPI.Control;
 
 namespace ninaAPI.WebService
 {
@@ -29,9 +30,11 @@ namespace ninaAPI.WebService
     {
         public WebServer Server;
 
-        private Thread serverThread;
 
         private CancellationTokenSource apiToken;
+        private Task serverTask;
+        private ControlAdapter adapter;
+        private readonly ControlConfiguration configuration = ControlConfiguration.Load();
         public readonly int Port;
 
         private static List<INinaWatcher> Watchers { get; set; } = new List<INinaWatcher>();
@@ -43,10 +46,15 @@ namespace ninaAPI.WebService
 
         public void CreateServer()
         {
+            adapter = new ControlAdapter(configuration);
             Server = new WebServer(o => o
-                .WithUrlPrefix($"http://*:{Port}")
+                .WithUrlPrefix($"http://{configuration.BindAddress}:{Port}/")
                 .WithMode(HttpListenerMode.EmbedIO))
-                .WithModule(new PreprocessRequestModule())
+                .WithModule(new ControlAuthModule(configuration))
+                .WithWebApi("/api/v1", m => m.WithController<ControlEndpoints>())
+                .WithModule(new ControlSocket(adapter));
+            if (configuration.EnableLegacyApi)
+                Server.WithModule(new PreprocessRequestModule())
                 .WithWebApi("/v2/api", m => m.WithController<ControllerV2>())
                 .WithModule(new WebSocketV2("/v2/socket"))
                 .WithModule(new TPPASocket("/v2/tppa"))
@@ -99,14 +107,20 @@ namespace ninaAPI.WebService
                 Logger.Info("Starting Webserver");
                 if (Server != null)
                 {
-                    serverThread = new Thread(() => APITask(Server));
-                    serverThread.Name = "API Thread";
-                    // serverThread.SetApartmentState(ApartmentState.STA);
-                    serverThread.Start();
+                    apiToken = new CancellationTokenSource();
+                    var server = Server;
+                    var token = apiToken.Token;
+                    serverTask = Task.Run(async () =>
+                    {
+                        try { await server.RunAsync(token); }
+                        catch (OperationCanceledException) { }
+                        catch (Exception exception) { Logger.Error(exception, "Starfront server stopped unexpectedly"); }
+                    });
                 }
             }
             catch (Exception ex)
             {
+                Stop();
                 Logger.Error($"failed to start web server: {ex}");
                 Notification.ShowError("Webserver start failed, please check the logs for more info");
             }
@@ -119,7 +133,12 @@ namespace ninaAPI.WebService
                 apiToken?.Cancel();
                 Server?.Dispose();
                 Server = null;
+                adapter?.Dispose();
+                adapter = null;
                 WebSocketV2.SetUnavailable();
+                var cancellation = apiToken;
+                apiToken = null;
+                if (serverTask is not null) _ = serverTask.ContinueWith(_ => cancellation?.Dispose(), TaskScheduler.Default);
             }
             catch (Exception ex)
             {
@@ -127,25 +146,6 @@ namespace ninaAPI.WebService
             }
         }
 
-        // [STAThread]
-        private void APITask(WebServer server)
-        {
-            string ipAdress = CoreUtility.GetLocalNames()["IPADRESS"];
-            Logger.Info($"starting web server, listening at {ipAdress}:{Port}");
-
-            try
-            {
-                apiToken = new CancellationTokenSource();
-                server.RunAsync(apiToken.Token).Wait();
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"failed to start web server: {ex}");
-                Notification.ShowError($"Failed to start web server, see NINA log for details");
-
-                Logger.Debug("aborting web server thread");
-            }
-        }
     }
 
     public class PreprocessRequestModule : WebModuleBase

@@ -21,12 +21,12 @@ namespace ninaAPI.Utility
     {
         public Communicator()
         {
-            AdvancedAPI.Controls.MessageBroker.Subscribe("AdvancedAPI.RequestPort", this);
+            AdvancedAPI.Controls.MessageBroker.Subscribe("StarfrontControl.RequestPort", this);
         }
 
         public void Dispose()
         {
-            AdvancedAPI.Controls.MessageBroker.Unsubscribe("AdvancedAPI.RequestPort", this);
+            AdvancedAPI.Controls.MessageBroker.Unsubscribe("StarfrontControl.RequestPort", this);
         }
 
         public Task OnMessageReceived(IMessage message)
@@ -54,7 +54,7 @@ namespace ninaAPI.Utility
 
         public IDictionary<string, object> CustomHeaders => new Dictionary<string, object>();
 
-        public string Topic => "AdvancedAPI.Port";
+        public string Topic => "StarfrontControl.Port";
 
         public object Content => port;
     }

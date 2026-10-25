@@ -48,10 +48,23 @@ namespace ninaAPI.WebService.V2
 
     public class TPPASocket : WebSocketModule, ISubscriber
     {
+        private readonly IMessageBroker messageBroker;
+
         public TPPASocket(string urlPath) : base(urlPath, true)
         {
-            AdvancedAPI.Controls.MessageBroker.Subscribe("PolarAlignmentPlugin_PolarAlignment_AlignmentError", this);
-            AdvancedAPI.Controls.MessageBroker.Subscribe("PolarAlignmentPlugin_PolarAlignment_Progress", this);
+            messageBroker = AdvancedAPI.Controls.MessageBroker;
+            messageBroker.Subscribe("PolarAlignmentPlugin_PolarAlignment_AlignmentError", this);
+            messageBroker.Subscribe("PolarAlignmentPlugin_PolarAlignment_Progress", this);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                messageBroker.Unsubscribe("PolarAlignmentPlugin_PolarAlignment_AlignmentError", this);
+                messageBroker.Unsubscribe("PolarAlignmentPlugin_PolarAlignment_Progress", this);
+            }
+            base.Dispose(disposing);
         }
 
         protected override async Task OnMessageReceivedAsync(IWebSocketContext context, byte[] rxBuffer, IWebSocketReceiveResult rxResult)

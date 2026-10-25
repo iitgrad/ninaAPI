@@ -21,6 +21,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Text;
 using System.Threading.Tasks;
+using StarfrontControl.Core;
 
 namespace ninaAPI.WebService.V2
 {
@@ -123,7 +124,7 @@ namespace ninaAPI.WebService.V2
 
         public static void SetUnavailable() => instance = null;
 
-        public static List<HttpResponse> Events = new List<HttpResponse>();
+        public static BoundedHistory<HttpResponse> Events { get; } = new(ResourceLimits.EventHistoryCapacity);
 
         protected override Task OnMessageReceivedAsync(IWebSocketContext context, byte[] rxBuffer, IWebSocketReceiveResult rxResult)
         {

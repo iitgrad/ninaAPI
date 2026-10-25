@@ -1,0 +1,12 @@
+{
+  "name": "starfront-control-web",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "astronomy-engine": "2.1.19",
+    "three": "0.186.1"
+  },
+  "devDependencies": {
+    "@types/three": "0.186.0"
+  }
+}

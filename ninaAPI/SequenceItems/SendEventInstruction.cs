@@ -26,7 +26,7 @@ namespace ninaAPI.SequenceItems
     [ExportMetadata("Name", "Send WebSocket Event")]
     [ExportMetadata("Description", "Sends a text message as an event to the WebSocket")]
     [ExportMetadata("Icon", "ScriptSVG")]
-    [ExportMetadata("Category", "Advanced API")]
+    [ExportMetadata("Category", "Starfront Control")]
     [Export(typeof(ISequenceItem))]
     [JsonObject(MemberSerialization.OptIn)]
     public class SendEventInstruction : SequenceItem, IValidatable

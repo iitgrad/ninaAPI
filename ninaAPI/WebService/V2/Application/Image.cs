@@ -490,7 +490,7 @@ namespace ninaAPI.WebService.V2
                             f.PopulateHeaderCards(imageData.MetaData);
 
                             // Populate the stream with the raw byte data of the FITS image.
-                            MemoryStream fits_stream = new MemoryStream();
+                            using MemoryStream fits_stream = new MemoryStream();
 
                             f.Write(fits_stream);
 

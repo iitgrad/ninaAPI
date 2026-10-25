@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <AssemblyName>StarfrontSimulation</AssemblyName>
+    <Version>0.1.0</Version>
+    <AssemblyTitle>Starfront Simulation</AssemblyTitle>
+    <Description>Virtual camera optics and cooling for the isolated Starfront test environment.</Description>
+    <Company>Kevin McQuown</Company>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="NINA.WPF.Base" Version="3.2.0.9001" />
+    <PackageReference Include="NINA.Plugin" Version="3.2.0.9001" />
+  </ItemGroup>
+</Project>

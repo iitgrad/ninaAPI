@@ -1,4 +1,4 @@
-﻿#region "copyright"
+#region "copyright"
 
 /*
     Copyright © 2025 Christian Palm (christian@palm-family.de)
@@ -24,7 +24,7 @@ namespace ninaAPI.WebService.V2
         [Route(HttpVerbs.Get, "/")]
         public string Index()
         {
-            return $"ninaAPI: https://github.com/rennmaus-coder/ninaAPI/, https://christian-photo.github.io/github-page/projects/ninaAPI/v2/doc/api, https://github.com/christian-photo/ninaAPI/wiki/Websocket-V2";
+            return $"Starfront Control: https://github.com/iitgrad/ninaAPI (derived from Advanced API by Christian Palm)";
         }
 
         [Route(HttpVerbs.Get, "/version")]

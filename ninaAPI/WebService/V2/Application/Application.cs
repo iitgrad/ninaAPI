@@ -146,7 +146,7 @@ namespace ninaAPI.WebService.V2
                     new_size = new Size(width, height);
                 }
 
-                Bitmap screenshot = new Bitmap(Screen.PrimaryScreen.Bounds.Width, Screen.PrimaryScreen.Bounds.Height);
+                using Bitmap screenshot = new Bitmap(Screen.PrimaryScreen.Bounds.Width, Screen.PrimaryScreen.Bounds.Height);
 
                 using (Graphics g = Graphics.FromImage(screenshot))
                 {

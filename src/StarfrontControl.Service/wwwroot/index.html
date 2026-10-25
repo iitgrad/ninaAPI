@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta
+      name="description"
+      content="Starfront observatory telemetry, imaging and sequence console"
+    />
+    <title>Starfront Control · Observatory Console</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#sequence-tree">Skip to sequence</a>
+    <header class="app-header">
+      <div class="brand">
+        <svg viewBox="0 0 32 32" aria-hidden="true">
+          <path
+            d="m6 12 14-7 5 9-14 7zM19 19l-4 5m0-2-6 8m6-8 6 8M4 11l4 8m14-16 5 10"
+          />
+        </svg>
+        <h1>Starfront Control</h1>
+        <span class="console-name">Observatory Console</span>
+      </div>
+      <div class="session-heading">
+        <span id="connection" class="status offline">Connecting</span
+        ><span id="target-title" hidden></span>
+      </div>
+      <div class="header-right">
+        <a id="preview-link" href="/?preview=1">Design preview</a><span class="clock-label">Local <time id="local-clock">—</time></span
+        ><span id="observation-age">Waiting for telemetry</span
+        ><button
+          id="open-tools"
+          class="icon-button"
+          aria-label="Open diagnostics"
+          title="Diagnostics"
+        >
+          ⚙
+        </button>
+      </div>
+    </header>
+    <p id="notice" role="status" hidden></p>
+    <div id="preview-banner" hidden>
+      DESIGN PREVIEW
+      <span
+        >Illustrative telemetry · recorded simulator image · commands
+        disabled</span
+      ><a href="/">Return to live observatory →</a>
+    </div>
+    <main id="monitor" hidden>
+      <div id="workspace">
+        <section id="equipment-strip" aria-label="Equipment overview"></section>
+        <div class="image-workspace">
+          <section
+            class="panel preview-panel"
+            aria-labelledby="preview-heading"
+          >
+            <div class="panel-heading">
+              <h2 id="preview-heading">
+                Image preview <span id="preview-target"></span>
+              </h2>
+              <div class="image-tools">
+                <button id="image-fit" aria-pressed="true">Fit</button
+                ><button id="image-actual" aria-pressed="false">1:1</button
+                ><button id="image-zoom" aria-pressed="false">2×</button
+                ><button
+                  id="image-fullscreen"
+                  aria-label="Expand image preview"
+                  title="Expand image"
+                >
+                  ⛶
+                </button>
+              </div>
+            </div>
+            <div id="image-stage" class="image-stage">
+              <div id="image-empty" class="empty-image">
+                <svg viewBox="0 0 60 60" aria-hidden="true">
+                  <circle cx="30" cy="30" r="22" />
+                  <path d="M4 30h15m22 0h15M30 4v15m0 22v15" />
+                  <circle cx="30" cy="30" r="6" /></svg
+                ><strong>Waiting for an image</strong
+                ><span>The next image preview will appear here.</span>
+              </div>
+              <img
+                id="latest-preview"
+                alt="Latest image from N.I.N.A."
+                hidden
+              />
+            </div>
+            <div class="image-foot">
+              <span id="image-caption"
+                >No image received in this plugin session</span
+              ><a id="image-download" hidden>FITS ↓</a>
+            </div>
+          </section>
+          <div class="image-inspector">
+            <section class="panel statistics-panel">
+              <div class="panel-heading">
+                <h2>Image statistics</h2>
+                <span id="image-dimensions" class="subtle">—</span>
+              </div>
+              <svg
+                id="histogram"
+                viewBox="0 0 300 95"
+                preserveAspectRatio="none"
+                role="img"
+                aria-label="Rendered preview luminance histogram"
+              ></svg>
+              <div class="chart-foot">
+                Preview luminance <span>8-bit rendered image</span>
+              </div>
+              <dl id="image-statistics" class="stat-readings"></dl>
+            </section>
+            <section class="panel imaging-panel">
+              <div class="panel-heading">
+                <h2>Imaging progress</h2>
+                <span id="capture-state" class="subtle">Idle</span>
+              </div>
+              <div class="capture-values">
+                <div>
+                  <span>Filter</span><strong id="capture-filter">—</strong>
+                </div>
+                <div>
+                  <span>Exposure</span><strong id="capture-exposure">—</strong>
+                </div>
+                <div>
+                  <span>Frame</span><strong id="capture-frame">—</strong>
+                </div>
+              </div>
+              <div
+                class="progress-track"
+                id="exposure-track"
+                role="progressbar"
+                aria-label="Current exposure"
+              >
+                <span id="exposure-progress"></span>
+              </div>
+              <div class="capture-foot">
+                <span id="capture-progress-label">No active exposure</span
+                ><span id="integration">—</span>
+              </div>
+              <div class="last-frame">
+                <h3>Last completed frame</h3>
+                <img
+                  id="last-preview"
+                  alt="Last completed frame preview"
+                  hidden
+                />
+                <dl id="last-frame-stats" class="stat-readings"></dl>
+              </div>
+            </section>
+          </div>
+        </div>
+        <div class="charts">
+          <section class="panel guide-panel">
+            <div class="panel-heading">
+              <h2>Guider <span>· PHD2</span></h2>
+              <span id="guide-status" class="subtle">No guide samples</span>
+            </div>
+            <div class="chart-layout">
+              <svg
+                id="guide-chart"
+                viewBox="0 0 460 145"
+                role="img"
+                aria-label="RA and Dec guide deviations over time"
+              ></svg>
+              <dl id="guide-readings" class="chart-readings"></dl>
+            </div>
+            <div class="plot-legend">
+              <span class="legend-ra">RA</span
+              ><span class="legend-dec">Dec</span
+              ><span id="guide-units">Raw guider distance</span>
+            </div>
+          </section>
+          <section class="panel focus-panel">
+            <div class="panel-heading">
+              <h2>Autofocus <span>· V-curve</span></h2>
+              <span id="autofocus-status" class="subtle">No focus run</span>
+            </div>
+            <div class="chart-layout">
+              <svg
+                id="focus-chart"
+                viewBox="0 0 460 145"
+                role="img"
+                aria-label="Autofocus HFR measurements by focuser position"
+              ></svg>
+              <dl id="focus-readings" class="chart-readings"></dl>
+            </div>
+            <div class="plot-legend">
+              <span class="legend-focus">Measured HFR</span
+              ><span id="focus-filter">—</span>
+            </div>
+          </section>
+        </div>
+        <div class="environment-strip">
+          <section class="panel weather-panel">
+            <div class="panel-heading">
+              <h2>Weather <span>· Observatory</span></h2>
+              <span id="weather-state" class="subtle">Not reported</span>
+            </div>
+            <div id="weather-readings" class="inline-readings"></div>
+          </section>
+          <section class="panel safety-panel">
+            <div class="panel-heading">
+              <h2>Safety &amp; hardware</h2>
+              <span id="aux-state" class="subtle"></span>
+            </div>
+            <div id="safety-readings" class="inline-readings"></div>
+          </section>
+        </div>
+      </div>
+      <aside class="sequence-panel" aria-label="Full sequence">
+        <div class="sequence-header">
+          <div class="sequence-title">
+            <h2>Sequence</h2>
+            <span id="sequence-title-actions"></span>
+          </div>
+          <div class="sequence-summary">
+            <span id="sequence-mode">Waiting for sequence</span
+            ><strong id="sequence-percent">—</strong>
+          </div>
+          <div
+            class="progress-track sequence-progress"
+            role="progressbar"
+            aria-label="Completed sequence instructions"
+          >
+            <span id="sequence-progress"></span>
+          </div>
+          <div class="sequence-meta">
+            <span id="sequence-coverage" role="status"></span
+            ><span id="sequence-running"></span>
+          </div>
+          <div class="sequence-actions">
+            <button id="sequence-start" disabled>▶ Start sequence</button
+            ><button id="sequence-stop" class="danger" disabled>
+              ■ Stop sequence</button
+            ><button id="sequence-reset" disabled>↺ Reset sequence</button
+            ><button id="sequence-fold-all" type="button">Collapse all</button
+            ><span id="sequence-action-hint"></span>
+          </div>
+          <p id="sequence-warning" hidden></p>
+        </div>
+        <div
+          id="sequence-tree"
+          tabindex="0"
+          aria-label="Sequence instructions"
+        ></div>
+        <div class="sequence-footer">
+          <span id="sequence-upcoming">No sequence loaded</span
+          ><span id="sequence-freshness"></span>
+        </div>
+      </aside>
+    </main>
+    <footer class="app-footer">
+      <span
+        ><span class="footer-dot"></span>
+        <span id="api-version">Starfront Control</span>
+        <span id="environment"></span
+      ></span>
+      <div class="health-strip">
+        <span>Memory <b id="memory">—</b> / heap <b id="heap">—</b></span
+        ><span>Queue <b id="queued">—</b></span
+        ><span>Clients <b id="clients">—</b></span
+        ><span>Log <b id="logs">—</b></span>
+      </div>
+    </footer>
+    <dialog id="tools-dialog" class="tools-dialog">
+      <div class="dialog-heading">
+        <div>
+          <h2>Diagnostics</h2>
+        </div>
+        <button id="close-tools" aria-label="Close diagnostics">
+          ✕
+        </button>
+      </div>
+      <section class="diagnostic-details">
+        <h3>Memory usage</h3>
+        <p>N.I.N.A. <strong id="diagnostic-memory">—</strong> · Managed heap <strong id="diagnostic-heap">—</strong></p>
+        <svg
+          id="memory-plot"
+          viewBox="0 0 600 180"
+          role="img"
+          aria-label="Observed N.I.N.A. process private memory"
+        >
+          <g id="plot-grid"></g>
+          <path id="memory-line"></path>
+          <text id="plot-empty" x="300" y="85" text-anchor="middle">
+            Waiting for diagnostic samples
+          </text>
+        </svg>
+        <div class="plot-time">
+          <span id="plot-start">—</span><span id="plot-end">—</span>
+        </div>
+      </section>
+      <section class="operation-panel">
+        <h2>Recent command results</h2>
+        <div class="operations-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Device</th>
+                <th>Action</th>
+                <th>Result</th>
+              </tr>
+            </thead>
+            <tbody id="operations"></tbody>
+          </table>
+        </div>
+      </section>
+    </dialog>
+    <dialog id="confirm-dialog" class="confirm-dialog">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-description"></p>
+      <div>
+        <button id="confirm-cancel">Cancel</button
+        ><button id="confirm-send" class="danger">Confirm</button>
+      </div>
+    </dialog>
+  </body>
+</html>

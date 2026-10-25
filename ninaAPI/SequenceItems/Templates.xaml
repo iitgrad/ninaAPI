@@ -36,6 +36,30 @@
         </mini:MiniSequenceItem>
     </DataTemplate>
 
+    <DataTemplate DataType="{x:Type local:SendNotificationInstruction}">
+        <nina:SequenceBlockView DataContext="{Binding}">
+            <nina:SequenceBlockView.SequenceItemContent>
+                <StackPanel>
+                    <TextBox MaxLength="512" MinWidth="260" Text="{Binding Message, UpdateSourceTrigger=PropertyChanged}" />
+                    <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                        <CheckBox VerticalAlignment="Center"
+                                  IsChecked="{Binding AttachPreview, Mode=TwoWay}"
+                                  AutomationProperties.Name="Attach photo"
+                                  ToolTip="Attach the latest camera preview if one is available from the last five minutes. Does not take a new exposure." />
+                        <TextBlock Margin="8,0,0,0" VerticalAlignment="Center" Text="Attach photo" />
+                    </StackPanel>
+                </StackPanel>
+            </nina:SequenceBlockView.SequenceItemContent>
+        </nina:SequenceBlockView>
+    </DataTemplate>
+    <DataTemplate x:Key="ninaAPI.SequenceItems.SendNotificationInstruction_Mini">
+        <mini:MiniSequenceItem>
+            <mini:MiniSequenceItem.SequenceItemContent>
+                <TextBlock Text="{Binding Message}" TextTrimming="CharacterEllipsis" MaxWidth="300" />
+            </mini:MiniSequenceItem.SequenceItemContent>
+        </mini:MiniSequenceItem>
+    </DataTemplate>
+
     <DataTemplate DataType="{x:Type local:SendErrorTrigger}">
         <nina:SequenceBlockView DataContext="{Binding}">
             <nina:SequenceBlockView.SequenceItemContent>

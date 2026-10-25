@@ -29,7 +29,7 @@ namespace ninaAPI.SequenceItems
     [ExportMetadata("Name", "Send Error to WebSocket")]
     [ExportMetadata("Description", "Sends an error message to the websocket if a sequence item failed")]
     [ExportMetadata("Icon", "ScriptSVG")]
-    [ExportMetadata("Category", "Advanced API")]
+    [ExportMetadata("Category", "Starfront Control")]
     [Export(typeof(ISequenceTrigger))]
     [JsonObject(MemberSerialization.OptIn)]
     public class SendErrorTrigger : SequenceTrigger, IValidatable

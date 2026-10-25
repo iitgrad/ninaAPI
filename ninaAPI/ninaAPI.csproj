@@ -1,6 +1,8 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFrameworks>net8.0-windows</TargetFrameworks>
+    <AssemblyName>StarfrontControl</AssemblyName>
+    <RootNamespace>ninaAPI</RootNamespace>
     <OutputType>Library</OutputType>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <UseWindowsForms>true</UseWindowsForms>
@@ -57,6 +59,7 @@
 
   <!-- Always active -->
   <ItemGroup>
+    <ProjectReference Include="../src/StarfrontControl.Core/StarfrontControl.Core.csproj" />
     <Compile Remove="manifests\**" />
     <Compile Remove="node_modules\**" />
     <Compile Remove="packages\**" />
@@ -93,9 +96,4 @@
     </None>
   </ItemGroup>
 
-  <Target Name="PostBuild" AfterTargets="PostBuildEvent">
-    <Exec Command="if not exist &quot;%25localappdata%25\NINA\Plugins&quot; mkdir &quot;%25localappdata%25\NINA\Plugins&quot;" />
-    <Exec Command="if not exist &quot;%25localappdata%25\NINA\Plugins\3.0.0\Advanced API&quot; mkdir &quot;%25localappdata%25\NINA\Plugins\3.0.0\Advanced API&quot;" />
-    <Exec Command="xcopy &quot;$(TargetPath)&quot; &quot;%25localappdata%25\NINA\Plugins\3.0.0\Advanced API&quot; /h/i/c/k/e/r/y" />
-  </Target>
 </Project>

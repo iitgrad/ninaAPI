@@ -32,7 +32,7 @@ namespace ninaAPI.WebService.V2.CustomDrivers
     [Export(typeof(IEquipmentProvider))]
     public class NetworkedRotatorProvider : IEquipmentProvider<IRotator>
     {
-        public string Name => "Networked Rotator";
+        public string Name => "Starfront Networked Rotator";
 
         public IList<IRotator> GetEquipment()
         {
@@ -68,13 +68,13 @@ namespace ninaAPI.WebService.V2.CustomDrivers
             }
         }
 
-        public string Id => "Networked Rotator";
+        public string Id => "StarfrontControl.NetworkedRotator";
 
-        public string Name => "Networked Rotator";
+        public string Name => "Starfront Networked Rotator";
 
-        public string DisplayName => "Networked Rotator";
+        public string DisplayName => "Starfront Networked Rotator";
 
-        public string Category => "Advanced API";
+        public string Category => "Starfront Control";
 
         public string Description => "A networked manual rotator";
 
@@ -246,6 +246,17 @@ namespace ninaAPI.WebService.V2.CustomDrivers
         {
             NetworkedRotator.MoveRequested += NetworkedRotator_MoveRequested;
             NetworkedRotator.MoveFinished += NetworkedRotator_RotationCompleted;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                NetworkedRotator.MoveRequested -= NetworkedRotator_MoveRequested;
+                NetworkedRotator.MoveFinished -= NetworkedRotator_RotationCompleted;
+                rotator = null;
+            }
+            base.Dispose(disposing);
         }
 
         private string makeRotationResponse()

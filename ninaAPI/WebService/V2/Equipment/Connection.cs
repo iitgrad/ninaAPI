@@ -231,7 +231,7 @@ namespace ninaAPI.WebService.V2
             HttpContext.WriteToResponse(response);
         }
 
-        private (IDeviceChooserVM, object) GetDeviceVM(string device)
+        internal static (IDeviceChooserVM, object) GetDeviceVM(string device)
         {
             IDeviceChooserVM chooser = null;
             object handler = null;

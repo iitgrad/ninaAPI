@@ -1,24 +1,27 @@
+using System.Runtime.Versioning;
 using System.Reflection;
 using System.Runtime.InteropServices;
 
+[assembly: SupportedOSPlatform("windows7.0")]
+
 // [MANDATORY] The following GUID is used as a unique identifier of the plugin
-[assembly: Guid("48b5bc05-f0d3-465e-a233-e2fe77d6e1a6")]
+[assembly: Guid("897ef051-204c-4dfb-9697-d3209a15adc0")]
 
 // [MANDATORY] The assembly versioning
 //Should be incremented for each new build of a plugin
-[assembly: AssemblyVersion("2.2.15.2")]
-[assembly: AssemblyFileVersion("2.2.15.2")]
+[assembly: AssemblyVersion("0.4.28.0")]
+[assembly: AssemblyFileVersion("0.4.28.0")]
 
 // [MANDATORY] The name of your plugin
-[assembly: AssemblyTitle("Advanced API")]
+[assembly: AssemblyTitle("Starfront Control")]
 // [MANDATORY] A short description of your plugin
-[assembly: AssemblyDescription("An experimental API for N.I.N.A.")]
+[assembly: AssemblyDescription("Private Starfront monitoring and control for N.I.N.A., derived from Advanced API.")]
 
 // Your name
-[assembly: AssemblyCompany("Christian Palm")]
+[assembly: AssemblyCompany("Kevin McQuown")]
 // The product name that this plugin is part of
-[assembly: AssemblyProduct("Advanced API")]
-[assembly: AssemblyCopyright("Copyright ©  2026")]
+[assembly: AssemblyProduct("Starfront Control")]
+[assembly: AssemblyCopyright("Copyright © 2025 Christian Palm; © 2026 Kevin McQuown")]
 
 // The minimum Version of N.I.N.A. that this plugin is compatible with
 [assembly: AssemblyMetadata("MinimumApplicationVersion", "3.2.0.9001")]
@@ -27,9 +30,9 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyMetadata("License", "MPL-2.0")]
 // The url to the license
 [assembly: AssemblyMetadata("LicenseURL", "https://www.mozilla.org/en-US/MPL/2.0/")]
-[assembly: AssemblyMetadata("Repository", "https://github.com/christian-photo/ninaAPI")]
-[assembly: AssemblyMetadata("ChangelogURL", "https://github.com/christian-photo/ninaAPI/blob/main/Changelog.md")]
-[assembly: AssemblyMetadata("Homepage", "https://buymeacoffee.com/christian.palm")]
+[assembly: AssemblyMetadata("Repository", "https://github.com/iitgrad/ninaAPI")]
+[assembly: AssemblyMetadata("ChangelogURL", "https://github.com/iitgrad/ninaAPI/blob/dev/Changelog.md")]
+[assembly: AssemblyMetadata("Homepage", "https://github.com/iitgrad/ninaAPI")]
 
 
 // The following attributes are optional for the official manifest meta data
@@ -38,9 +41,12 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyMetadata("Tags", "API,Web")]
 
 //[Optional] An in-depth description of your plugin
-[assembly: AssemblyMetadata("LongDescription", @"This plugin features an HTTP server, including an api and websockets!
+[assembly: AssemblyMetadata("LongDescription", @"Starfront Control is a private fork of Advanced API by Christian Palm.
+Experimental development build; Windows simulation validation is pending.
+It retains the upstream HTTP and WebSocket interfaces while resource management
+and a new telemetry/control interface are developed.
 
-## Features:
+## Upstream features:
 - Listen to events like connections, meridian flips and much more
 - TPPA integration (Requires TPPA to be installed)
 - Livestack integration (Requires Livestack to be installed)
@@ -49,8 +55,9 @@ using System.Runtime.InteropServices;
 
 ---
 
-If you have question/issues/feedback, you can create an issue [here](https://github.com/christian-photo/ninaAPI/issues), take a look at the
-[documentation](https://christian-photo.github.io/github-page/projects/ninaAPI/v2/doc/api) and here for the [websockets](https://github.com/christian-photo/ninaAPI/wiki/Websocket-V2) or just ask on the N.I.N.A. discord in [#plugin-discussions](https://discord.com/channels/436650817295089664/854531935660146718)
+Report Starfront Control issues [here](https://github.com/iitgrad/ninaAPI/issues).
+Original Advanced API [HTTP documentation](https://christian-photo.github.io/github-page/projects/ninaAPI/v2/doc/api)
+and [WebSocket documentation](https://github.com/christian-photo/ninaAPI/wiki/Websocket-V2).
 **Thanks to szymon and notzeeg (discord) for their help!**")]
 
 

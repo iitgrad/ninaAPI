@@ -603,7 +603,7 @@ namespace ninaAPI.WebService.V2
                 }
                 else if (getResult && CaptureTask.IsCompleted)
                 {
-                    Bitmap img = new Bitmap(Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), $"temp.png"));
+                    using Bitmap img = new Bitmap(Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), $"temp.png"));
                     BitmapSource source = ImageUtility.ConvertBitmap(img);
                     if (stream)
                     {
