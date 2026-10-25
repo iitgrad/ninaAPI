@@ -1,3 +1,217 @@
+// web/replay.ts
+function mountReplay(hooks) {
+  let active = false, index, at = 0, playing = false, version = 0, abort, speed = 60, lastReal = 0;
+  const clock = new Intl.DateTimeFormat(undefined, { timeZone: "America/Chicago", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const date = new Intl.DateTimeFormat(undefined, { timeZone: "America/Chicago", dateStyle: "medium" });
+  const button = document.createElement("button");
+  button.id = "open-recordings";
+  button.textContent = "◷ Recordings";
+  button.title = "Browse recorded observing nights";
+  document.querySelector(".header-right").prepend(button);
+  const picker = document.createElement("dialog");
+  picker.className = "recordings-dialog";
+  picker.setAttribute("aria-label", "Night recordings");
+  picker.innerHTML = '<header><div><small>OBSERVATORY ARCHIVE</small><h2>Night recordings</h2></div><button class="close-recordings" aria-label="Close recordings">×</button></header><p class="recordings-status" role="status"></p><div class="recordings-list"></div>';
+  document.body.append(picker);
+  picker.querySelector(".close-recordings").onclick = () => picker.close();
+  const bar = document.createElement("section");
+  bar.id = "replay-timeline";
+  bar.hidden = true;
+  bar.setAttribute("aria-label", "Recording playback");
+  bar.innerHTML = '<div class="replay-heading"><strong>REPLAY</strong><span id="replay-night"></span><time id="replay-clock"></time><span id="replay-state" role="status"></span><button id="return-live">Return to Live ↗</button></div><div class="replay-controls"><button id="replay-play" aria-label="Play recording">▶</button><button id="replay-previous" aria-label="Previous event">│◀</button><button id="replay-next" aria-label="Next event">▶│</button><select id="replay-speed" aria-label="Playback speed"><option value="1">1×</option><option value="10">10×</option><option value="60" selected>60×</option><option value="300">300×</option></select><div class="replay-track"><div class="replay-marks" aria-hidden="true"></div><input id="replay-scrubber" aria-label="Recording time" type="range" step="1000"><div class="replay-scale"></div></div><select id="replay-events" aria-label="Jump to recorded event"><option value="">Events</option></select></div>';
+  document.body.append(bar);
+  const find = (id) => bar.querySelector("#" + id);
+  const slider = find("replay-scrubber"), status = find("replay-state"), play = find("replay-play");
+  const label = (text) => {
+    status.textContent = text;
+  };
+  function stop() {
+    playing = false;
+    play.textContent = "▶";
+    play.setAttribute("aria-label", "Play recording");
+  }
+  function leave() {
+    ++version;
+    abort?.abort();
+    stop();
+    active = false;
+    index = undefined;
+    bar.hidden = true;
+    document.body.classList.remove("replay-mode");
+    hooks.mode(false);
+  }
+  find("return-live").onclick = leave;
+  async function seek(time) {
+    if (!active || !index)
+      return;
+    const ticket = ++version;
+    abort?.abort();
+    abort = new AbortController;
+    at = Math.max(index.start, Math.min(index.end, time));
+    slider.value = String(at);
+    label("Loading recorded state…");
+    try {
+      const frame = await hooks.read("/api/v1/recordings/" + index.id + "/state?at=" + Math.round(at), abort.signal);
+      if (ticket !== version || !active)
+        return;
+      hooks.frame(frame);
+      find("replay-clock").textContent = clock.format(frame.at) + " Central";
+      label(frame.gap ? "No recorded telemetry · last update " + (frame.lastTelemetryAt ? clock.format(frame.lastTelemetryAt) : "unavailable") : "Recorded telemetry · controls disabled");
+      status.classList.toggle("gap", frame.gap);
+    } catch (error) {
+      if (ticket === version && active) {
+        stop();
+        label(error instanceof Error ? error.message : "Could not load recording");
+      }
+    }
+  }
+  function track() {
+    if (!index)
+      return;
+    const duration = Math.max(1, index.end - index.start), marks = bar.querySelector(".replay-marks");
+    marks.replaceChildren();
+    for (const gap of index.gaps) {
+      const span = document.createElement("i");
+      span.className = "replay-gap";
+      span.style.left = (gap.start - index.start) / duration * 100 + "%";
+      span.style.width = (gap.end - gap.start) / duration * 100 + "%";
+      marks.append(span);
+    }
+    const chosen = index.events.filter((e) => e.kind !== "step").concat(index.events.filter((e) => e.kind === "step")).slice(0, 180);
+    for (const event of chosen) {
+      const mark = document.createElement("i");
+      mark.className = "replay-mark kind-" + event.kind;
+      mark.style.left = (event.at - index.start) / duration * 100 + "%";
+      marks.append(mark);
+    }
+    const scale = bar.querySelector(".replay-scale");
+    scale.replaceChildren();
+    for (let i = 0;i <= 4; i++) {
+      const t = document.createElement("span");
+      t.textContent = clock.format(index.start + duration * i / 4);
+      scale.append(t);
+    }
+    const events = find("replay-events");
+    events.replaceChildren(new Option("Events · " + index.events.length, ""));
+    for (const e of index.events)
+      events.add(new Option(clock.format(e.at) + " · " + e.label, String(e.at)));
+  }
+  async function select(recording) {
+    picker.close();
+    stop();
+    abort?.abort();
+    const ticket = ++version;
+    active = true;
+    index = undefined;
+    document.body.classList.add("replay-mode");
+    bar.hidden = false;
+    find("replay-night").textContent = date.format(Date.parse(recording.startedAt));
+    label("Indexing recording…");
+    hooks.mode(true);
+    slider.disabled = true;
+    play.disabled = true;
+    try {
+      const result = await hooks.read("/api/v1/recordings/" + recording.id);
+      if (!active || ticket !== version)
+        return;
+      index = result;
+      at = index.start;
+      slider.min = String(index.start);
+      slider.max = String(index.end);
+      slider.disabled = false;
+      play.disabled = false;
+      track();
+      await seek(index.firstTelemetryAt || at);
+    } catch (e) {
+      if (active && ticket === version)
+        label(e instanceof Error ? e.message : "Could not open recording");
+    }
+  }
+  button.onclick = async () => {
+    const listing = picker.querySelector(".recordings-list"), message = picker.querySelector(".recordings-status");
+    listing.replaceChildren();
+    message.textContent = "Loading recordings…";
+    picker.showModal();
+    try {
+      const entries = await hooks.read("/api/v1/recordings");
+      message.textContent = entries.length ? "Times shown in America/Chicago. Shaded regions mark missing telemetry." : "No recordings yet.";
+      for (const r of entries) {
+        const row = document.createElement("button");
+        row.className = "recording-entry";
+        row.disabled = r.state === "recording";
+        row.dataset.recordingId = r.id;
+        const title = document.createElement("strong");
+        title.textContent = date.format(Date.parse(r.startedAt));
+        const sub = document.createElement("span");
+        sub.textContent = clock.format(Date.parse(r.startedAt)) + " · " + r.rig + (r.environment === "simulation" ? " · Simulation" : "");
+        const badge = document.createElement("small");
+        badge.textContent = r.state === "recording" ? "Recording now" : r.state;
+        row.append(title, sub, badge);
+        row.onclick = () => void select(r);
+        listing.append(row);
+      }
+    } catch (e) {
+      message.textContent = e instanceof Error ? e.message : "Recording archive unavailable";
+    }
+  };
+  let scrubTimer;
+  slider.oninput = () => {
+    stop();
+    clearTimeout(scrubTimer);
+    scrubTimer = setTimeout(() => void seek(Number(slider.value)), 100);
+  };
+  slider.onchange = () => {
+    clearTimeout(scrubTimer);
+    seek(Number(slider.value));
+  };
+  find("replay-events").onchange = (event) => {
+    const val = event.target.value;
+    if (val) {
+      stop();
+      seek(Number(val));
+    }
+  };
+  for (const [id, direction] of [["replay-previous", -1], ["replay-next", 1]])
+    find(id).onclick = () => {
+      if (!index)
+        return;
+      stop();
+      const events = index.events.map((e) => e.at);
+      const next = direction > 0 ? events.find((t) => t > at + 1) : events.filter((t) => t < at - 1).at(-1);
+      seek(next ?? (direction > 0 ? index.end : index.start));
+    };
+  find("replay-speed").onchange = (e) => {
+    speed = Number(e.target.value);
+  };
+  async function tick() {
+    if (!playing || !active || !index)
+      return;
+    const now = performance.now(), next = at + (now - lastReal) * speed;
+    lastReal = now;
+    await seek(next);
+    if (at >= index.end)
+      stop();
+    if (playing)
+      setTimeout(() => void tick(), 250);
+  }
+  play.onclick = () => {
+    if (playing) {
+      stop();
+      return;
+    }
+    if (!index)
+      return;
+    if (at >= index.end)
+      at = index.start;
+    playing = true;
+    lastReal = performance.now();
+    play.textContent = "Ⅱ";
+    play.setAttribute("aria-label", "Pause recording");
+    tick();
+  };
+  return { active: () => active, at: () => at };
+}
+
 // web/sequence-command-state.ts
 function sequenceCommandIdentity(sequence) {
   if (typeof sequence.sequenceId === "string" && typeof sequence.configurationRevision === "number" && Number.isInteger(sequence.configurationRevision) && sequence.configurationRevision > 0)
@@ -35,9 +249,9 @@ function countdownElement(remaining, observedAt) {
   span.textContent = sequenceCountdown(deadline);
   return span;
 }
-function updateSequenceClocks(live) {
+function updateSequenceClocks(live, now = Date.now()) {
   for (const span of document.querySelectorAll(".sequence-countdown")) {
-    const text = sequenceCountdown(Number(span.dataset.deadline), Date.now(), live);
+    const text = sequenceCountdown(Number(span.dataset.deadline), now, live);
     if (span.textContent !== text)
       span.textContent = text;
   }
@@ -30551,7 +30765,7 @@ function stepTiming(t, zone = "America/Chicago") {
     return null;
   const start = t.startedAt && clock(t.startedAt), end = t.endedAt && clock(t.endedAt), seen = t.seenActiveAt && clock(t.seenActiveAt);
   const text = start ? `Start ${start}${end ? " · End " + end : ""}` : end ? `End ${end}` : seen ? `Seen ${seen}` : "";
-  return text ? { text, title: `Observed via ${t.source === "gateway-received" ? "gateway WebSocket" : "live updates"} · ${zone}. Receipt times, not N.I.N.A. log timestamps. ${t.startedAt ?? t.seenActiveAt ?? ""} ${t.endedAt ?? ""}` } : null;
+  return text ? { text, title: `Observed via ${t.source === "gateway-received" ? "gateway WebSocket" : t.source === "recording-received" ? "recorded WebSocket" : "live updates"} · ${zone}. Receipt times, not N.I.N.A. log timestamps. ${t.startedAt ?? t.seenActiveAt ?? ""} ${t.endedAt ?? ""}` } : null;
 }
 
 // web/target-visibility.ts
@@ -30607,7 +30821,7 @@ function svg(tag, attrs, text) {
     e.textContent = text;
   return e;
 }
-function renderVisibility(host, ra, dec, site, day, width = 1000) {
+function renderVisibility(host, ra, dec, site, day, width = 1000, now = Date.now()) {
   const compact = width < 520;
   host.classList.toggle("is-compact", compact);
   const v = visibility(ra, dec, site, day), W = Math.max(180, Math.round(width)), H = width < 360 ? 140 : compact ? 180 : 230, L = 34, R = 20, T = compact ? 28 : 42, B = 28, x = (t) => L + (t - v.start) / (v.end - v.start) * (W - L - R), y = (a) => T + (90 - a) / 90 * (H - T - B);
@@ -30636,9 +30850,7 @@ function renderVisibility(host, ra, dec, site, day, width = 1000) {
         graph.append(svg("text", { x: lx, y: ly, "text-anchor": "middle", fill: "#b4d8e1", "font-size": 11 }, event.label + " " + clock(event.time)));
       }
     }
-  const now = Date.now();
-  if (now >= v.start && now <= v.end)
-    graph.append(svg("line", { x1: x(now), x2: x(now), y1: T, y2: H - B, stroke: "#f3c978", "stroke-width": 1.5 }));
+  graph.append(svg("line", { "data-observing-clock": "1", "data-start": v.start, "data-end": v.end, "data-width": W, x1: x(now), x2: x(now), y1: T, y2: H - B, stroke: "#f3c978", "stroke-width": 1.5, visibility: now >= v.start && now <= v.end ? "visible" : "hidden" }));
   host.replaceChildren(graph);
   const eventLegend = document.createElement("div");
   eventLegend.className = "target-events";
@@ -30659,6 +30871,15 @@ function renderVisibility(host, ra, dec, site, day, width = 1000) {
   const note = document.createElement("small");
   note.textContent = `${site.name || "Profile site"} · ${site.latitude.toFixed(3)}°, ${site.longitude.toFixed(3)}° · ${site.timeZone} · Geometric altitude / standard rise-set`;
   host.append(note);
+}
+function updateVisibilityClock(host, now) {
+  const line = host.querySelector("[data-observing-clock]");
+  if (!line)
+    return;
+  const start = Number(line.dataset.start), end = Number(line.dataset.end), width = Number(line.dataset.width), x = 34 + (now - start) / (end - start) * (width - 54);
+  line.setAttribute("x1", String(x));
+  line.setAttribute("x2", String(x));
+  line.setAttribute("visibility", now >= start && now <= end ? "visible" : "hidden");
 }
 
 // web/target-framing.ts
@@ -30760,13 +30981,15 @@ function finishTargetHeaders() {
     headers.delete(id);
   }
 }
-function targetHeader(target, site, profileId) {
-  const day = site ? siteDate(new Date(Date.now() - 12 * 3600000), site.timeZone) : undefined;
+function targetHeader(target, site, profileId, now = Date.now()) {
+  const day = site ? siteDate(new Date(now - 12 * 3600000), site.timeZone) : undefined;
   const key = JSON.stringify([target.editableFields, site, profileId, day]);
   used.add(target.id);
   const cached = headers.get(target.id);
-  if (cached?.key === key)
+  if (cached?.key === key) {
+    updateVisibilityClock(cached.panel, now);
     return cached.panel;
+  }
   if (cached) {
     const old = cached.panel.querySelector(".target-altitude");
     if (old) {
@@ -30812,7 +31035,7 @@ function targetHeader(target, site, profileId) {
       if (width <= 0)
         return;
       try {
-        renderVisibility(chart, ra, dec, site, day, width);
+        renderVisibility(chart, ra, dec, site, day, width, now);
       } catch {
         chart.textContent = "Visibility unavailable for this site or date.";
       }
@@ -31006,7 +31229,7 @@ function renderSequenceView(tree, nodes, options) {
     if (options.collapsed.has(item.id))
       return group;
     if (target)
-      group.append(targetHeader(item, options.site, options.profileId));
+      group.append(targetHeader(item, options.site, options.profileId, options.observedAt ? Date.parse(options.observedAt) : undefined));
     const layout = el("div", "sequence-scope-layout" + (triggers.length ? " has-triggers" : ""));
     group.append(layout);
     const body = el("div", "sequence-set-main"), ordinary = slot(item, "ordinary", "sequence-ordinary");
@@ -31427,7 +31650,7 @@ function renderSequence(sequence, live, session, site, cooling = {}, profileId, 
     sequenceScrollRestore = undefined;
   }) };
 }
-function updateExposureClock(live = true) {
+function updateExposureClock(live = true, now = Date.now()) {
   const sequenceProgress = document.getElementById("sequence-exposure-inline");
   if (sequenceProgress)
     sequenceProgress.hidden = !exposure || !live;
@@ -31437,7 +31660,7 @@ function updateExposureClock(live = true) {
     text("capture-progress-label", "Cached exposure · telemetry unavailable");
     return;
   }
-  const remaining = Math.max(0, (exposure.end - Date.now()) / 1000);
+  const remaining = Math.max(0, (exposure.end - now) / 1000);
   const elapsed = Math.max(0, Math.min(exposure.duration, exposure.duration - remaining));
   const pct = exposure.duration ? elapsed / exposure.duration * 100 : 0;
   text("capture-exposure", `${format(elapsed, 0)} / ${format(exposure.duration, 0)} s`);
@@ -31453,7 +31676,7 @@ function updateExposureClock(live = true) {
   node("exposure-progress").style.width = Math.min(100, pct) + "%";
   node("exposure-track").setAttribute("aria-valuenow", String(Math.floor(pct)));
 }
-function renderDashboard(states, live, session) {
+function renderDashboard(states, live, session, now = Date.now()) {
   if (cachedSession !== session) {
     collapsed.clear();
     treeSignature = "";
@@ -31523,7 +31746,7 @@ function renderDashboard(states, live, session) {
   const site = value("administration").site;
   const temperature = (name) => {
     const t = states[name], v = t?.value;
-    return live && v?.connected === true && t && Date.now() - Date.parse(t.observedAt) < 60000 && typeof v.temperature === "number" && Number.isFinite(v.temperature) ? v.temperature : undefined;
+    return live && v?.connected === true && t && now - Date.parse(t.observedAt) < 60000 && typeof v.temperature === "number" && Number.isFinite(v.temperature) ? v.temperature : undefined;
   };
   renderSequence(value("sequence"), live, session, site?.timeZone ? site : undefined, { focuserTemperature: temperature("focuser"), weatherTemperature: temperature("weather") }, value("administration").profile?.id, states.sequence?.observedAt);
   for (const item of value("sequence").nodes ?? []) {
@@ -31603,7 +31826,7 @@ function renderDashboard(states, live, session) {
     node("exposure-progress").style.width = camera.isExposing === true ? "100%" : "0";
     node("exposure-track").removeAttribute("aria-valuenow");
   } else
-    updateExposureClock();
+    updateExposureClock(live, now);
   const history2 = value("imageHistory").items ?? [];
   const integration = history2.reduce((total, item) => total + (numeric2(item.exposure) ? item.exposure : 0), 0);
   text("integration", history2.length ? `Recent: ${Math.floor(integration / 60)}m · ${history2.length} frames` : "Recent integration —");
@@ -32144,6 +32367,9 @@ document.getElementById("dashboard-lock")?.addEventListener("click", async () =>
   await request("/auth/dashboard-logout", {});
   location.replace("/dashboard/");
 });
+var liveCurrent = null;
+var replayFrame = null;
+var replayMode = false;
 var current = null;
 var websocket = null;
 var retry = 1000;
@@ -32172,13 +32398,18 @@ function topic(name) {
   return current?.snapshot?.states[name]?.value ?? {};
 }
 function fresh() {
+  if (replayMode)
+    return false;
   const stamp = current?.bridge.lastReceivedAt ?? current?.snapshot?.states.diagnostics?.observedAt;
   return socketReady && current?.bridge.connected === true && !!stamp && Date.now() - Date.parse(stamp) < 30000 && Date.now() - Date.parse(stamp) >= -5000;
 }
-async function request(path, body) {
+async function request(path, body, signal) {
+  if (replayMode && body != null && path.startsWith("/api/"))
+    throw new Error("Replay is read-only. Return to Live to control equipment.");
   if (preview && body != null)
     throw new Error("Commands are disabled in design preview.");
   const response = await fetch(gatewayBase + path, {
+    signal,
     method: body == null ? "GET" : "POST",
     headers: body == null ? {} : { "Content-Type": "application/json" },
     body: body == null ? undefined : JSON.stringify(body)
@@ -32200,6 +32431,8 @@ function operations() {
   return topic("operations").items ?? [];
 }
 function commandReason(device, action) {
+  if (replayMode)
+    return "Replay is read-only. Return to Live to control equipment.";
   if (preview)
     return "Commands are disabled in design preview.";
   if (!fresh())
@@ -32407,7 +32640,7 @@ function renderActions() {
     button.title = reason;
   }
   const startReason = commandReason("sequence", "start");
-  write("sequence-action-hint", preview ? "Preview · controls disabled" : topic("application").sequenceRunning ? "Sequence running" : startReason === "Acquisition or another command is active." ? "" : startReason);
+  write("sequence-action-hint", replayMode ? "Replay · controls disabled" : preview ? "Preview · controls disabled" : topic("application").sequenceRunning ? "Sequence running" : startReason === "Acquisition or another command is active." ? "" : startReason);
 }
 var updateDevicePanels = mountDevicePanels({
   states: () => current?.snapshot?.states ?? {},
@@ -32429,7 +32662,7 @@ var updateSequenceEditor = mountSequenceEditor({
   submit: (parameters) => send("sequence", "insertDraft", undefined, parameters, true)
 });
 function updateClock() {
-  write("local-clock", clockFormat.format(new Date));
+  write("local-clock", clockFormat.format(new Date(replayMode && replayFrame ? replayFrame.at : Date.now())));
   const observed = current?.snapshot?.states.camera?.observedAt;
   const age = observed ? (Date.now() - Date.parse(observed)) / 1000 : NaN;
   write("observation-age", preview ? "Illustrative data" : !Number.isFinite(age) ? "Waiting for telemetry" : age < -5 ? "Device clock differs" : `Observed ${Math.max(0, Math.floor(age))}s ago${fresh() ? "" : " · stale"}`);
@@ -32438,15 +32671,22 @@ function updateClock() {
     el3("connection").classList.toggle("offline", !fresh());
     document.body.dataset.transport = fresh() ? "live" : "offline";
   }
-  renderRoofStatus(current?.snapshot?.states ?? {}, preview || fresh());
+  if (replayMode) {
+    write("connection", "REPLAY");
+    el3("connection").classList.remove("offline");
+    document.body.dataset.transport = "replay";
+    write("observation-age", replayFrame?.gap ? "No recorded telemetry" : "Recorded · " + (replayFrame ? time(new Date(replayFrame.lastTelemetryAt).toISOString()) : "Loading"));
+  }
+  const readingsAvailable = replayMode ? !!replayFrame && !replayFrame.gap : preview || fresh();
+  renderRoofStatus(current?.snapshot?.states ?? {}, readingsAvailable);
   const roof = el3("roof-status");
   roof.disabled = true;
   roof.onclick = null;
   roof.title = String(topic("safetyConnection").error ?? "Roof monitoring stays connected");
   if (topic("safetyConnection").error && topic("safety").connected !== true)
     roof.textContent = "Roof · retrying";
-  updateExposureClock(preview || fresh());
-  updateSequenceClocks(preview || fresh());
+  updateExposureClock(readingsAvailable, replayMode ? replayFrame?.at : undefined);
+  updateSequenceClocks(readingsAvailable, replayMode ? replayFrame?.at : undefined);
   renderActions();
   updateDevicePanels();
   updateSequenceEditor();
@@ -32455,8 +32695,8 @@ function updateClock() {
 setInterval(updateClock, 250);
 document.addEventListener("visibilitychange", updateClock);
 function render() {
-  const states = current?.snapshot?.states ?? {}, live = preview || fresh();
-  renderDashboard(states, live, current?.snapshot?.sessionId ?? "");
+  const states = current?.snapshot?.states ?? {}, live = replayMode ? !!replayFrame && !replayFrame.gap : preview || fresh();
+  renderDashboard(states, live, current?.snapshot?.sessionId ?? "", replayMode ? replayFrame?.at : undefined);
   const app = topic("application"), diagnostic = topic("diagnostics");
   write("environment", preview ? "Illustrative preview" : app.environment === "simulation" ? "Simulation" : app.environment === "equipment" ? "Equipment" : "Environment unknown");
   write("api-version", "Starfront Control");
@@ -32542,6 +32782,11 @@ function connect() {
       notice("An invalid telemetry message was ignored.");
       return;
     }
+    liveCurrent = current;
+    if (replayMode) {
+      current = replayFrame ? { bridge: { connected: false }, snapshot: replayFrame.snapshot } : null;
+      return;
+    }
     if (current.snapshot && current.snapshot.sessionId !== currentSession) {
       if (currentSession && pending.size)
         notice("N.I.N.A. restarted. Check Operations and equipment state before issuing another command.");
@@ -32557,7 +32802,9 @@ function connect() {
     if (socket !== websocket)
       return;
     socketReady = false;
-    if (current)
+    if (liveCurrent)
+      liveCurrent.bridge.connected = false;
+    if (!replayMode && current)
       current.bridge.connected = false;
     render();
     setTimeout(connect, retry);
@@ -32588,6 +32835,7 @@ async function start() {
       await request(gatewayBase ? "/auth/dashboard-session" : "/auth/local-session", {});
       current = await request("/api/v1/status");
     }
+    liveCurrent = current;
     el3("notice").hidden = true;
     el3("monitor").hidden = false;
     render();
@@ -32598,6 +32846,28 @@ async function start() {
     setTimeout(() => void start(), 5000);
   }
 }
+mountReplay({
+  read: (path, signal) => request(path, undefined, signal),
+  mode(active) {
+    replayMode = active;
+    replayFrame = null;
+    current = active ? null : liveCurrent;
+    samples.length = 0;
+    lastMetric = "";
+    confirm.close();
+    document.querySelectorAll("dialog[open]").forEach((d) => d.close());
+    render();
+  },
+  frame(frame) {
+    if (replayFrame && frame.at < replayFrame.at) {
+      samples.length = 0;
+      lastMetric = "";
+    }
+    replayFrame = frame;
+    current = { bridge: { connected: false }, snapshot: frame.snapshot };
+    render();
+  }
+});
 new ResizeObserver(renderPlot).observe(el3("memory-plot"));
 start();
 window.addEventListener("focus", () => {

@@ -103,7 +103,7 @@ export function renderSequenceView(tree:HTMLElement,nodes:VisualNode[],options:{
       }
     }
     if(options.collapsed.has(item.id))return group;
-    if(target)group.append(targetHeader(item,options.site,options.profileId));
+    if(target)group.append(targetHeader(item,options.site,options.profileId,options.observedAt?Date.parse(options.observedAt):undefined));
     const layout=el("div","sequence-scope-layout"+(triggers.length?" has-triggers":""));group.append(layout);
     const body=el("div","sequence-set-main"),ordinary=slot(item,"ordinary","sequence-ordinary");body.append(ordinary);layout.append(body);
     list.filter(n=>["container","instruction"].includes(n.kind)).forEach((n,i)=>ordinary.append(build(n,area?depth:depth+1,i+1,item)));

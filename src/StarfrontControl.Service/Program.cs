@@ -19,6 +19,7 @@ builder.Logging.AddProvider(new RollingLoggerProvider());
 builder.Logging.SetMinimumLevel(LogLevel.Warning);
 builder.Services.AddSingleton(config);
 builder.Services.AddSingleton<SurveyFraming>();
+builder.Services.AddSingleton<RecordingReplay>();
 builder.Services.AddSingleton<PushNotifications>();
 builder.Services.AddHostedService(provider => provider.GetRequiredService<PushNotifications>());
 builder.Services.AddSingleton<BridgeConnection>();
@@ -165,6 +166,17 @@ app.MapPost("/api/v1/browser-session", () =>
     return Results.Ok(new { ticket });
     }
 });
+async Task<IResult> ReplayRead(Func<Task<object>> read) {
+    try {return Results.Ok(await read());}
+    catch(ArgumentException){return Results.BadRequest(new {error="Invalid recording request."});}
+    catch(FileNotFoundException){return Results.NotFound(new {error="Recording not found."});}
+    catch(DirectoryNotFoundException){return Results.NotFound(new {error="Recording not found."});}
+    catch(InvalidOperationException e){return Results.Conflict(new {error=e.Message});}
+    catch(Exception e) when(e is IOException or JsonException or UnauthorizedAccessException){return Results.UnprocessableEntity(new {error="Recording could not be read safely. Original files were preserved."});}
+}
+app.MapGet("/api/v1/recordings", (RecordingReplay replay)=>ReplayRead(()=>Task.FromResult(replay.List())));
+app.MapGet("/api/v1/recordings/{id}", (RecordingReplay replay,string id,HttpContext ctx)=>ReplayRead(async()=>await replay.Index(id,ctx.RequestAborted)));
+app.MapGet("/api/v1/recordings/{id}/state", (RecordingReplay replay,string id,long at,HttpContext ctx)=>ReplayRead(()=>replay.At(id,at,ctx.RequestAborted)));
 app.MapGet("/api/v1/status", () => Results.Text(bridge.Read(), "application/json"));
 app.MapGet("/api/v1/doctor", () => Results.Ok(new { service = "Starfront Control", version = typeof(ServiceConfiguration).Assembly.GetName().Version?.ToString(), bridgeConnected = bridge.Connected, clients = bridge.Clients.ClientCount, clientLimit = 16, pendingFramesPerClient = 1, coalescedFrames = bridge.Clients.CoalescedCount, diagnostics = app.Services.GetRequiredService<ServiceDiagnostics>().Latest }));
 

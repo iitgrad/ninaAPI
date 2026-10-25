@@ -1,4 +1,4 @@
-import {renderVisibility,siteDate,type Site} from './target-visibility';
+import {renderVisibility,updateVisibilityClock,siteDate,type Site} from './target-visibility';
 type Target={id:string;editableFields?:{key:string;value:unknown}[]};
 import {targetFraming} from './target-framing';
 const plots=new Map<HTMLElement,(width:number)=>void>();
@@ -11,10 +11,10 @@ export function clearTargetHeaders(){used=new Set();}
 export function finishTargetHeaders(){
  for(const [id,entry] of headers){if(used.has(id))continue;const chart=entry.panel.querySelector<HTMLElement>('.target-altitude');if(chart){resize.unobserve(chart);plots.delete(chart);}headers.delete(id);}
 }
-export function targetHeader(target:Target,site?:Site,profileId?:string){
- const day=site?siteDate(new Date(Date.now()-12*3600000),site.timeZone):undefined;
+export function targetHeader(target:Target,site?:Site,profileId?:string,now=Date.now()){
+ const day=site?siteDate(new Date(now-12*3600000),site.timeZone):undefined;
  const key=JSON.stringify([target.editableFields,site,profileId,day]);used.add(target.id);
- const cached=headers.get(target.id);if(cached?.key===key)return cached.panel;
+ const cached=headers.get(target.id);if(cached?.key===key){updateVisibilityClock(cached.panel,now);return cached.panel;}
  if(cached){const old=cached.panel.querySelector<HTMLElement>('.target-altitude');if(old){resize.unobserve(old);plots.delete(old);}}
  const panel=document.createElement('div');panel.className='target-planning';headers.set(target.id,{key,panel});
  const value=(key:string)=>target.editableFields?.find(f=>f.key===key)?.value;
@@ -26,7 +26,7 @@ export function targetHeader(target:Target,site?:Site,profileId?:string){
  panel.append(coordinates);const visuals=document.createElement('div');visuals.className='target-visuals';const chart=document.createElement('div');chart.className='target-altitude';visuals.append(targetFraming(ra,dec,rotation,profileId),chart);panel.append(visuals);
  if(site&&typeof ra==='number'&&typeof dec==='number'){
   let width=0;
-  const draw=(available=width)=>{width=available;if(width<=0)return;try{renderVisibility(chart,ra,dec,site,day!,width);}catch{chart.textContent='Visibility unavailable for this site or date.';}};
+  const draw=(available=width)=>{width=available;if(width<=0)return;try{renderVisibility(chart,ra,dec,site,day!,width,now);}catch{chart.textContent='Visibility unavailable for this site or date.';}};
   plots.set(chart,available=>{if(Math.round(available)!==Math.round(width))draw(available);});resize.observe(chart);
   draw();
  }else{chart.textContent='Observing-site telemetry required for visibility.';chart.classList.add('target-site-missing');}

@@ -26,7 +26,7 @@ export function visibility(ra:number,dec:number,site:Site,day:string):Visibility
 }
 const svgNS='http://www.w3.org/2000/svg';
 function svg(tag:string,attrs:Record<string,string|number>,text?:string){const e=document.createElementNS(svgNS,tag);for(const [k,v] of Object.entries(attrs))e.setAttribute(k,String(v));if(text)e.textContent=text;return e;}
-export function renderVisibility(host:HTMLElement,ra:number,dec:number,site:Site,day:string,width=1000){
+export function renderVisibility(host:HTMLElement,ra:number,dec:number,site:Site,day:string,width=1000,now=Date.now()){
  const compact=width<520;
  host.classList.toggle('is-compact',compact);
  const v=visibility(ra,dec,site,day),W=Math.max(180,Math.round(width)),H=width<360?140:compact?180:230,L=34,R=20,T=compact?28:42,B=28,x=(t:number)=>L+(t-v.start)/(v.end-v.start)*(W-L-R),y=(a:number)=>T+(90-a)/90*(H-T-B);
@@ -40,7 +40,7 @@ export function renderVisibility(host:HTMLElement,ra:number,dec:number,site:Site
  const events=[{time:v.rise,label:'Rise'},{time:v.transit,label:`Meridian ${v.peak.toFixed(0)}°`},{time:v.set,label:'Set'}];
  const labels:{x:number;y:number}[]=[];
  for(const event of events)if(event.time!=null&&event.time>=v.start&&event.time<=v.end){const px=x(event.time);graph.append(svg('line',{x1:px,x2:px,y1:T,y2:H-B,stroke:'#78b9ce','stroke-dasharray':'3 5','stroke-opacity':'.6'}));if(!compact){const lx=Math.min(W-85,Math.max(85,px)),ly=labels.some(label=>Math.abs(label.x-lx)<130&&label.y===16)?30:16;labels.push({x:lx,y:ly});graph.append(svg('text',{x:lx,y:ly,'text-anchor':'middle',fill:'#b4d8e1','font-size':11},event.label+' '+clock(event.time)));}}
- const now=Date.now();if(now>=v.start&&now<=v.end)graph.append(svg('line',{x1:x(now),x2:x(now),y1:T,y2:H-B,stroke:'#f3c978','stroke-width':1.5}));
+ graph.append(svg('line',{'data-observing-clock':'1','data-start':v.start,'data-end':v.end,'data-width':W,x1:x(now),x2:x(now),y1:T,y2:H-B,stroke:'#f3c978','stroke-width':1.5,visibility:now>=v.start&&now<=v.end?'visible':'hidden'}));
  host.replaceChildren(graph);
  const eventLegend=document.createElement('div');eventLegend.className='target-events';
  for(const event of events){const span=document.createElement('span');span.textContent=event.label+' '+(event.time==null?'—':clock(event.time));eventLegend.append(span);}host.append(eventLegend);
@@ -48,3 +48,5 @@ export function renderVisibility(host:HTMLElement,ra:number,dec:number,site:Site
  for(const event of v.twilight){const span=document.createElement('span');span.textContent=event.label+' '+(event.time==null?'—':clock(event.time));legend.append(span);}
  host.append(legend);const note=document.createElement('small');note.textContent=`${site.name||'Profile site'} · ${site.latitude.toFixed(3)}°, ${site.longitude.toFixed(3)}° · ${site.timeZone} · Geometric altitude / standard rise-set`;host.append(note);
 }
+
+export function updateVisibilityClock(host:HTMLElement,now:number){const line=host.querySelector<SVGElement>('[data-observing-clock]');if(!line)return;const start=Number(line.dataset.start),end=Number(line.dataset.end),width=Number(line.dataset.width),x=34+(now-start)/(end-start)*(width-54);line.setAttribute('x1',String(x));line.setAttribute('x2',String(x));line.setAttribute('visibility',now>=start&&now<=end?'visible':'hidden');}

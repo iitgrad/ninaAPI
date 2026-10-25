@@ -4,5 +4,5 @@ export function stepTiming(t:StepTiming|undefined,zone='America/Chicago'){
  if(!t)return null;
  const start=t.startedAt&&clock(t.startedAt),end=t.endedAt&&clock(t.endedAt),seen=t.seenActiveAt&&clock(t.seenActiveAt);
  const text=start?`Start ${start}${end?' · End '+end:''}`:end?`End ${end}`:seen?`Seen ${seen}`:'';
- return text?{text,title:`Observed via ${t.source==='gateway-received'?'gateway WebSocket':'live updates'} · ${zone}. Receipt times, not N.I.N.A. log timestamps. ${t.startedAt??t.seenActiveAt??''} ${t.endedAt??''}`} : null;
+ return text?{text,title:`Observed via ${t.source==='gateway-received'?'gateway WebSocket':t.source==='recording-received'?'recorded WebSocket':'live updates'} · ${zone}. Receipt times, not N.I.N.A. log timestamps. ${t.startedAt??t.seenActiveAt??''} ${t.endedAt??''}`} : null;
 }

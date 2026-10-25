@@ -11,9 +11,9 @@ export function countdownElement(remaining:unknown,observedAt:unknown):HTMLSpanE
  const deadline=Date.parse(observedAt)+remaining*1000;if(!Number.isFinite(deadline))return;
  const span=document.createElement('span');span.className='sequence-countdown';span.dataset.deadline=String(deadline);span.textContent=sequenceCountdown(deadline);return span;
 }
-export function updateSequenceClocks(live:boolean){
+export function updateSequenceClocks(live:boolean,now=Date.now()){
  for(const span of document.querySelectorAll<HTMLElement>('.sequence-countdown')){
-  const text=sequenceCountdown(Number(span.dataset.deadline),Date.now(),live);if(span.textContent!==text)span.textContent=text;
+  const text=sequenceCountdown(Number(span.dataset.deadline),now,live);if(span.textContent!==text)span.textContent=text;
  }
 }
 

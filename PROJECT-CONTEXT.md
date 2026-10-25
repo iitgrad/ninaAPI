@@ -1545,3 +1545,32 @@ No missing telemetry was backfilled. Production config unchanged; rollback under
 ~/.local/share/starfront-recorder/deployments/20261025-reconnect. Evidence Operations
 .codex-artifacts/2026-10-25-recorder-recovery/REPORT.md; sanitized deployment receipt
 ops/deployments/2026-10-25-recorder-recovery.json. New push alerts/replay UI not added.
+
+## October25 — dashboard Replay mode
+
+User requested/pushed a clean baseline before replay: plugin/dashboard fork58db473
+on origin/codex/starfront-control-foundation; Operations companion/recorder baseline
+cd94a01 on origin/codex/full-image-processing. Unrelated Operations image-processing
+and Mac-app edits remain preserved outside those commits.
+
+Gateway0.4.29 implements authenticated read-only recording list/index/state endpoints,
+separate minute-chunk seek cache and the web Recordings picker/timeline. Existing
+panels render recorded state; exposure/countdown/visibility clocks use recording
+observation time. Commands and editing are blocked throughout Replay. Live frames
+remain separate, gaps are explicit, previews are only recorded previews, observed
+step timing is reconstructed without bridging gaps. Original journals/recorder are
+not modified. See docs/REPLAY.md. Web UI only; no iOS replay screen added.
+
+15service tests,21targeted TS tests,6website proxy tests and strictTS pass. Playwright
+fallback used because Browser plugin unavailable. Actual desktop/mobile390px replay
+of an unchanged October24 recording copy passed select/scrub/play/pause/gap/return,
+zero equipment POSTs and no page errors. Local cold index4.24s; production25.62s,
+subsequent seeks4–67ms. Production gateway0.4.29 is healthy with unchanged config,
+no restarts after launch, peak133484544bytes; independent recorder0.2.1 PID and
+connection unchanged/armed. No NINA restart, equipment actions or capture started.
+
+Site source785c25c128c767280c46ea2081d14f8b738beb3a preserves89pages/3834references.
+Two packaged-archive uploads timed out at the external blob endpoint; supported
+source-build fallback saved version112 and deployment was dispatched. Record its
+terminal outcome before claiming public-site completion. Evidence Operations
+.codex-artifacts/2026-10-25-dashboard-replay/production-verification.json and screenshots.

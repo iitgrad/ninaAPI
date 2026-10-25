@@ -1,3 +1,4 @@
+import {mountReplay,type ReplayFrame} from "./replay";
 import {sequenceCommandIdentity,sequenceStopState} from './sequence-command-state';
 import {updateSequenceClocks} from './sequence-clock';
 import { mountSequenceLibrary } from "./sequence-library";
@@ -55,6 +56,9 @@ document
     await request("/auth/dashboard-logout", {});
     location.replace("/dashboard/");
   });
+let liveCurrent:Envelope|null=null;
+let replayFrame:ReplayFrame|null=null;
+let replayMode=false;
 let current: Envelope | null = null,
   websocket: WebSocket | null = null,
   retry = 1000,
@@ -85,6 +89,7 @@ function topic(name: string): Record<string, unknown> {
   return current?.snapshot?.states[name]?.value ?? {};
 }
 function fresh() {
+  if(replayMode)return false;
   const stamp =
     current?.bridge.lastReceivedAt ??
     current?.snapshot?.states.diagnostics?.observedAt;
@@ -99,10 +104,13 @@ function fresh() {
 async function request(
   path: string,
   body?: unknown,
+  signal?:AbortSignal,
 ): Promise<Record<string, unknown>> {
+  if(replayMode&&body!=null&&path.startsWith("/api/"))throw new Error("Replay is read-only. Return to Live to control equipment.");
   if (preview && body != null)
     throw new Error("Commands are disabled in design preview.");
   const response = await fetch(gatewayBase + path, {
+    signal,
     method: body == null ? "GET" : "POST",
     headers: body == null ? {} : { "Content-Type": "application/json" },
     body: body == null ? undefined : JSON.stringify(body),
@@ -125,6 +133,7 @@ function operations(): Operation[] {
   return (topic("operations").items ?? []) as Operation[];
 }
 function commandReason(device: string, action: string): string {
+  if(replayMode)return "Replay is read-only. Return to Live to control equipment.";
   if (preview) return "Commands are disabled in design preview.";
   if (!fresh()) return "Waiting for fresh, connected telemetry.";
   if(!((topic("commands").items??[]) as {device:string;action:string}[]).some(c=>c.device===device&&c.action===action))return "This plugin does not support this control yet.";
@@ -388,7 +397,7 @@ function renderActions() {
   const startReason = commandReason("sequence", "start");
   write(
     "sequence-action-hint",
-    preview
+    replayMode ? "Replay · controls disabled" : preview
       ? "Preview · controls disabled"
       : topic("application").sequenceRunning
         ? "Sequence running"
@@ -413,7 +422,7 @@ const updateSequenceEditor = mountSequenceEditor({
   submit: parameters => send("sequence","insertDraft",undefined,parameters,true),
 });
 function updateClock() {
-  write("local-clock", clockFormat.format(new Date()));
+  write("local-clock", clockFormat.format(new Date(replayMode&&replayFrame?replayFrame.at:Date.now())));
   const observed = current?.snapshot?.states.camera?.observedAt;
   const age = observed ? (Date.now() - Date.parse(observed)) / 1000 : NaN;
   write(
@@ -438,15 +447,20 @@ function updateClock() {
     el("connection").classList.toggle("offline", !fresh());
     document.body.dataset.transport = fresh() ? "live" : "offline";
   }
-  renderRoofStatus(current?.snapshot?.states ?? {}, preview || fresh());
+  if(replayMode){
+    write("connection","REPLAY");el("connection").classList.remove("offline");document.body.dataset.transport="replay";
+    write("observation-age",replayFrame?.gap?"No recorded telemetry":"Recorded · "+(replayFrame?time(new Date(replayFrame.lastTelemetryAt).toISOString()):"Loading"));
+  }
+  const readingsAvailable=replayMode?!!replayFrame&&!replayFrame.gap:preview||fresh();
+  renderRoofStatus(current?.snapshot?.states ?? {},readingsAvailable);
   const roof = el<HTMLButtonElement>("roof-status");
   roof.disabled = true;
   roof.onclick = null;
   roof.title = String(topic("safetyConnection").error ?? "Roof monitoring stays connected");
   if(topic("safetyConnection").error && topic("safety").connected!==true)roof.textContent="Roof · retrying";
 
-  updateExposureClock(preview || fresh());
-  updateSequenceClocks(preview || fresh());
+  updateExposureClock(readingsAvailable,replayMode?replayFrame?.at:undefined);
+  updateSequenceClocks(readingsAvailable,replayMode?replayFrame?.at:undefined);
   renderActions();
   updateDevicePanels();
   updateSequenceEditor();
@@ -457,8 +471,8 @@ setInterval(updateClock, 250);
 document.addEventListener("visibilitychange", updateClock);
 function render() {
   const states = current?.snapshot?.states ?? {},
-    live = preview || fresh();
-  renderDashboard(states, live, current?.snapshot?.sessionId ?? "");
+    live = replayMode?!!replayFrame&&!replayFrame.gap:preview||fresh();
+  renderDashboard(states, live, current?.snapshot?.sessionId ?? "",replayMode?replayFrame?.at:undefined);
   const app = topic("application"),
     diagnostic = topic("diagnostics");
   write(
@@ -579,6 +593,8 @@ function connect() {
       notice("An invalid telemetry message was ignored.");
       return;
     }
+    liveCurrent=current;
+    if(replayMode){current=replayFrame?{bridge:{connected:false},snapshot:replayFrame.snapshot}:null;return;}
     if (current.snapshot && current.snapshot.sessionId !== currentSession) {
       if (currentSession && pending.size)
         notice(
@@ -594,7 +610,8 @@ function connect() {
   socket.onclose = () => {
     if (socket !== websocket) return;
     socketReady = false;
-    if (current) current.bridge.connected = false;
+    if(liveCurrent)liveCurrent.bridge.connected=false;
+    if (!replayMode&&current) current.bridge.connected = false;
     render();
     setTimeout(connect, retry);
     if (gatewayBase)
@@ -629,6 +646,7 @@ async function start() {
       );
       current = (await request("/api/v1/status")) as unknown as Envelope;
     }
+    liveCurrent=current;
     el("notice").hidden = true;
     el("monitor").hidden = false;
     render();
@@ -638,6 +656,11 @@ async function start() {
     setTimeout(() => void start(), 5000);
   }
 }
+mountReplay({
+  read:(path,signal)=>request(path,undefined,signal),
+  mode(active){replayMode=active;replayFrame=null;current=active?null:liveCurrent;samples.length=0;lastMetric="";confirm.close();document.querySelectorAll<HTMLDialogElement>("dialog[open]").forEach(d=>d.close());render();},
+  frame(frame){if(replayFrame&&frame.at<replayFrame.at){samples.length=0;lastMetric="";}replayFrame=frame;current={bridge:{connected:false},snapshot:frame.snapshot};render();}
+});
 new ResizeObserver(renderPlot).observe(el("memory-plot"));
 void start();
 

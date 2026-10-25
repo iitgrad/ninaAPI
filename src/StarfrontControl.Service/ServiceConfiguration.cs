@@ -4,7 +4,7 @@ namespace StarfrontControl.Service;
 
 public sealed record ServiceConfiguration(string BridgeUrl, string BridgeToken, string Token,
     string ListenUrl = "http://127.0.0.1:1890", string? BridgeHostHeader = null,
-    string? PublicDashboardOrigin = null, string? PublicPinHash = null, FramingProfile[]? FramingProfiles = null)
+    string? PublicDashboardOrigin = null, string? PublicPinHash = null, FramingProfile[]? FramingProfiles = null, string? RecordingsDirectory = null, string? ReplayCacheDirectory = null)
 {
     public static string DefaultPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config", "starfront-control", "service.json");
     public static string ConfigurationPath => Environment.GetEnvironmentVariable("STARFRONT_SERVICE_CONFIG") ?? DefaultPath;

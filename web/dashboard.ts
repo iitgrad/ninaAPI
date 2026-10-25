@@ -477,7 +477,7 @@ function renderSequence(
   sequenceScrollRestore={top:scroll,frame:requestAnimationFrame(()=>{tree.scrollTop=scroll;sequenceScrollRestore=undefined;})};
 
 }
-export function updateExposureClock(live = true) {
+export function updateExposureClock(live = true, now=Date.now()) {
   const sequenceProgress=document.getElementById("sequence-exposure-inline");
   if(sequenceProgress)sequenceProgress.hidden=!exposure||!live;
   if (!exposure) return;
@@ -485,7 +485,7 @@ export function updateExposureClock(live = true) {
     text("capture-progress-label", "Cached exposure · telemetry unavailable");
     return;
   }
-  const remaining = Math.max(0, (exposure.end - Date.now()) / 1000);
+  const remaining = Math.max(0, (exposure.end - now) / 1000);
   const elapsed = Math.max(
     0,
     Math.min(exposure.duration, exposure.duration - remaining),
@@ -512,6 +512,7 @@ export function renderDashboard(
   states: Record<string, Topic>,
   live: boolean,
   session: string,
+  now=Date.now(),
 ) {
   if (cachedSession !== session) {
     collapsed.clear();
@@ -612,7 +613,7 @@ export function renderDashboard(
   const site = value("administration").site as Site | undefined;
   const temperature = (name:string) => {
     const t=states[name],v=t?.value;
-    return live && v?.connected===true && t && Date.now()-Date.parse(t.observedAt)<60000 && typeof v.temperature==='number' && Number.isFinite(v.temperature)?v.temperature:undefined;
+    return live && v?.connected===true && t && now-Date.parse(t.observedAt)<60000 && typeof v.temperature==='number' && Number.isFinite(v.temperature)?v.temperature:undefined;
   };
   renderSequence(value("sequence"), live, session, site?.timeZone ? site : undefined,{focuserTemperature:temperature('focuser'),weatherTemperature:temperature('weather')},(value('administration').profile as {id?:string}|undefined)?.id,states.sequence?.observedAt);
   for(const item of (value("sequence").nodes??[]) as SequenceNode[]){
@@ -752,7 +753,7 @@ export function renderDashboard(
     node("exposure-progress").style.width =
       camera.isExposing === true ? "100%" : "0";
     node("exposure-track").removeAttribute("aria-valuenow");
-  } else updateExposureClock();
+  } else updateExposureClock(live,now);
   const history = (value("imageHistory").items ?? []) as Record<
     string,
     unknown
