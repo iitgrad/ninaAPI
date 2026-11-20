@@ -2169,3 +2169,16 @@ use the previous wait until their recovery block is updated.
 
 Core tests cover timestamp parsing, Safe before cutoff, a continuously Unsafe
 monitor, cancellation, and deadline priority when the monitor is already Safe.
+
+Verification on November 20: 146 core, 44 service, and 81 browser/analysis
+tests passed. The Windows plugin cross-build succeeded. The observatory NUC
+was idle before its graceful restart (PID 17272 to 7808), and the installed
+five-file package matched the release archive. Live N.I.N.A. reported
+0.4.33.0, listed the new container in the Starfront Control catalog, and
+loaded a stopped fixture containing the container and a nested wait. The
+dashboard save check was rejected because the Targets library was still
+initializing. The original shutdown sequence was reloaded stopped, with
+equipment disconnected and the safety monitor connected. Neither the
+fixture nor a live roof transition was run. Local artifacts are under
+`artifacts/2026-11-20-safe-deadline`. NUC backup and pre-restart raw-log
+manifest are under `%LOCALAPPDATA%/Temp/StarfrontDeadline-20261120`.
