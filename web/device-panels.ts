@@ -1,4 +1,4 @@
-import { ThermalHistory, thermalPaths } from "./camera-thermal";
+import { ThermalHistory, thermalPaths, type ThermalSample } from "./camera-thermal";
 import {defaultMountCamera} from "./mount-view";
 import {updateMountView,disposeMountView} from "./mount-renderer";
 import {horizontalTarget,validPointingSite} from "./mount-pointing";
@@ -8,6 +8,10 @@ type API = {
   states: () => Record<string, Topic>;
   session: () => string;
   live: () => boolean;
+  replay?:()=>boolean;
+  readings?:()=>boolean;
+  clock?:()=>number;
+  thermalSamples?:()=>ThermalSample[]|undefined;
   reason: (device: string, action: string) => string;
   run: (device: string, action: string, parameters?: Data) => void;
 };
@@ -42,7 +46,8 @@ const el = <T extends HTMLElement = HTMLElement>(
 export function mountDevicePanels(api: API) {
   let storage: Storage | undefined;
   try { storage = window.localStorage; } catch { /* Browser storage can be disabled. */ }
-  const history = new ThermalHistory(storage);
+  const liveHistory = new ThermalHistory(storage);
+  let replayHistory = new ThermalHistory(),history=liveHistory,lastReplayTime=0;
   let mountCamera={...defaultMountCamera};
   let selected = "",
     context = "",
@@ -167,6 +172,7 @@ export function mountDevicePanels(api: API) {
     return box;
   }
   function open(key: string, keyboard = false) {
+    if(api.replay?.())return;
     // Pointer opening must not leave focus on the background card when closed.
     // Keyboard opening preserves the browser's normal focus restoration.
     if (!keyboard && !dialog.open && document.activeElement instanceof HTMLElement)
@@ -443,11 +449,12 @@ export function mountDevicePanels(api: API) {
     const clocks = mini
       ? ""
       : `<text x="40" y="169">${new Date(start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</text><text x="460" y="169" text-anchor="end">${new Date(end).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</text><text x="40" y="12">°C</text><text x="460" y="12" text-anchor="end">%</text>`;
-    container.innerHTML = `<svg viewBox="0 0 510 180" role="img" aria-label="Camera temperature and cooler power over time">${labels}<path class="thermal-temperature" d="${thermalPaths(a, "temperature", x, y)}"/><path class="thermal-power" d="${thermalPaths(a, "power", x, p)}"/>${a.length === 1 && a[0].temperature !== null ? `<circle cx="${x(a[0].at)}" cy="${y(a[0].temperature)}" r="3"/>` : ""}${clocks}${valid.length ? "" : '<text x="255" y="90" text-anchor="middle">Waiting for temperature telemetry</text>'}</svg>`;
+    container.innerHTML = `<svg viewBox="0 0 510 180" role="img" aria-label="Camera temperature and cooler power over time">${labels}<path class="thermal-temperature" d="${thermalPaths(a, "temperature", x, y)}"/><path class="thermal-power" d="${thermalPaths(a, "power", x, p)}"/>${a.filter((s,i)=>s.temperature!==null&&(i===0||a[i-1].temperature===null||s.at-a[i-1].at>15000)&&(i===a.length-1||a[i+1].temperature===null||a[i+1].at-s.at>15000)).map(s=>`<circle cx="${x(s.at)}" cy="${y(s.temperature!)}" r="2"/>`).join("")}${clocks}${valid.length ? "" : '<text x="255" y="90" text-anchor="middle">'+(api.replay?.()?'No recorded temperature samples':'Waiting for temperature telemetry')+'</text>'}</svg>`;
   }
   function update() {
     const states = api.states(),
-      liveNow = api.live(),
+      liveNow = api.live(),recorded=api.replay?.()===true,readingsNow=api.readings?.()??liveNow,
+      now=api.clock?.()??Date.now(),
       reasonNow = selected
         ? api.reason(
             selected,
@@ -470,6 +477,9 @@ export function mountDevicePanels(api: API) {
     lastLive = liveNow;
     lastSelected = selected;
     lastReason = reasonNow;
+    if(recorded&&now<lastReplayTime)replayHistory=new ThermalHistory();
+    history=recorded?replayHistory:liveHistory;lastReplayTime=recorded?now:0;
+    for(const key of primary){const heading=document.querySelector<HTMLElement>('#equipment-'+key+' .equipment-title');if(heading){heading.tabIndex=recorded?-1:0;heading.role=recorded?'group':'button';heading.setAttribute('aria-label',devices[key][0]+(recorded?' recorded state':' controls'));}}
     const camera = states.camera?.value ?? {},
       id =
         ((states.devices?.value.items ?? []) as Data[]).find(
@@ -477,29 +487,35 @@ export function mountDevicePanels(api: API) {
         )?.id ??
         camera.name ??
         "";
-    if (api.session() && id) history.receive(
+    const archivedSamples=recorded?api.thermalSamples?.():undefined;
+    if(archivedSamples)history.samples=archivedSamples.filter(s=>s.at<=now&&s.at>=now-3600000);
+    if (!archivedSamples && api.session() && id) history.receive(
       JSON.stringify([api.session(), (states.administration?.value.profile as Data | undefined)?.id ?? "", id]),
-      Date.parse(states.diagnostics?.observedAt ?? ""),
-      api.live() && camera.connected === true,
+      Date.parse((recorded?states.camera?.observedAt:states.diagnostics?.observedAt) ?? ""),
+      readingsNow && camera.connected === true,
       camera.temperature,
       camera.coolerPower,
+      now,
     );
     const mini = document.querySelector<HTMLElement>(
       "#equipment-camera .equipment-values",
     );
-    if (mini) {
-      mini.classList.add("camera-thermal-mini");
-      thermal(mini, true);
-      const caption = document.createElement("div");
-      caption.className = "thermal-mini-caption";
-      caption.textContent =
-        api.live() && camera.connected === true
-          ? `${format(camera.temperature, 1, "°C")} · ${format(camera.coolerPower, 0, "%")}`
-          : "Camera offline";
-      mini.append(caption);
+    // The graph lives beside the reading container, so telemetry never replaces
+    // the current temperature or delta with chart markup.
+    const cameraCard=document.getElementById('equipment-camera')!;
+    cameraCard.classList.toggle('has-recorded-thermal',recorded);
+    let cardChart=cameraCard.querySelector<HTMLElement>('[data-camera-thermal-chart]');
+    if(mini){
+      mini.classList.remove('camera-thermal-mini');
+      if(!cardChart){cardChart=document.createElement('div');cardChart.dataset.cameraThermalChart='';cardChart.className='camera-thermal-mini recorded-camera-chart';mini.after(cardChart);}
+      cardChart.toggleAttribute('data-recorded-camera-chart',recorded);
+      thermal(cardChart,true);
+      const legend=document.createElement('div');legend.className='thermal-mini-caption';legend.innerHTML='<span class="recorded-temperature-key">Temperature</span> · <span class="recorded-power-key">Cooler %</span>';cardChart.append(legend);
     }
     const mountMini=document.querySelector<HTMLElement>('#equipment-mount .equipment-values');
-    if(mountMini){mountMini.classList.add('mount-mini');updateMountView(mountMini,states.mount?.value??{},liveNow,true);}
+    if(mountMini){mountMini.classList.add('mount-mini');updateMountView(mountMini,states.mount?.value??{},recorded?readingsNow||mount.connected===true:liveNow,true);
+      const caption=mountMini.querySelector<HTMLElement>('.mount-motion');if(caption){const raw=(caption.textContent??'').replace(/^(Recorded|Last recorded) · /,'');caption.textContent=recorded?(readingsNow?'Recorded · ':'Last recorded · ')+raw:raw;}}
+
     if (!selected) return;
     const s = state(),
       live = api.live(),

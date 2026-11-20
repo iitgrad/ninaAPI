@@ -9,8 +9,8 @@ using System.Runtime.InteropServices;
 
 // [MANDATORY] The assembly versioning
 //Should be incremented for each new build of a plugin
-[assembly: AssemblyVersion("0.4.28.0")]
-[assembly: AssemblyFileVersion("0.4.28.0")]
+[assembly: AssemblyVersion("0.4.33.0")]
+[assembly: AssemblyFileVersion("0.4.33.0")]
 
 // [MANDATORY] The name of your plugin
 [assembly: AssemblyTitle("Starfront Control")]

@@ -17,6 +17,7 @@ public sealed class RecordingReplay {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private static readonly Regex Id = new("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", RegexOptions.CultureInvariant);
     private readonly string root, cache;
+    public string RecordingsRoot => root;
     private readonly SemaphoreSlim gate = new(1);
     private const long CacheLimit = 512L * 1024 * 1024;
     public RecordingReplay(ServiceConfiguration config) : this(config.RecordingsDirectory ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local/share/starfront-recorder/recordings"),
@@ -42,9 +43,9 @@ public sealed class RecordingReplay {
     }
     public async Task<ReplayIndex> Index(string id, CancellationToken cancel = default) {
         await gate.WaitAsync(cancel);
-        try { return await Task.Run(() => Build(id), cancel); } finally { gate.Release(); }
+        try { return await Task.Run(() => Build(id,cancel), cancel); } finally { gate.Release(); }
     }
-    private ReplayIndex Build(string id) {
+    private ReplayIndex Build(string id,CancellationToken cancel=default) {
         var dir=Folder(id);var manifest=Path.Combine(dir,"manifest.json");Plain(manifest);
         if(new FileInfo(manifest).Length>16384)throw new InvalidDataException("Recording metadata exceeds bounds.");
         var raw=File.ReadAllText(manifest);var meta=JsonNode.Parse(raw)!.AsObject();
@@ -52,7 +53,7 @@ public sealed class RecordingReplay {
         var files=Directory.GetFiles(dir,"events-*.ndjson.gz").OrderBy(p=>p,StringComparer.Ordinal).ToArray();
         if(files.Length>256 || files.Sum(f=>new FileInfo(f).Length)>1024L*1024*1024)throw new InvalidDataException("Recording exceeds replay bounds.");
         foreach(var file in files)Plain(file);
-        var fingerprint=Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("replay-1:"+raw+string.Join(";",files.Select(f=>new FileInfo(f).Length+":"+File.GetLastWriteTimeUtc(f).Ticks)))));
+        var fingerprint=Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("replay-2:"+raw+string.Join(";",files.Select(f=>new FileInfo(f).Length+":"+File.GetLastWriteTimeUtc(f).Ticks)))));
         Directory.CreateDirectory(cache);Plain(cache);var dest=Path.Combine(cache,id);var indexFile=Path.Combine(dest,"index.json");
         if(File.Exists(indexFile)) { Plain(dest);Plain(indexFile);var old=JsonSerializer.Deserialize<ReplayIndex>(File.ReadAllText(indexFile),Json);if(old?.Fingerprint==fingerprint){Directory.SetLastWriteTimeUtc(dest,DateTime.UtcNow);return old;}Directory.Delete(dest,true); }
         // Only owned cache directories are disposable. Original recordings are never changed.
@@ -73,6 +74,7 @@ public sealed class RecordingReplay {
                 try {
                     using var input=File.OpenRead(file);using var gzip=new GZipStream(input,CompressionMode.Decompress);using var reader=new StreamReader(gzip);
                     while(true) {
+                        cancel.ThrowIfCancellationRequested();
                         string? line;
                         try { line=reader.ReadLine(); } catch(InvalidDataException) when(meta["state"]?.GetValue<string>()=="interrupted") {truncated=true;break;}
                         if(line is null)break;
@@ -142,6 +144,7 @@ public sealed class RecordingReplay {
                     if(new FileInfo(path).Length>256*1024)throw new InvalidDataException("Recorded image exceeds bounds.");preview["jpeg"]=Convert.ToBase64String(File.ReadAllBytes(path));
                 }
                 return new {mode="replay",recordingId=id,at,lastTelemetryAt=state.LastTelemetryAt,gap,
+                    cameraThermal=state.CameraThermal.Where(s=>s.At>=at-3600000&&s.At<=at).ToArray(),
                     snapshot=new {schemaVersion=1,sessionId="replay:"+id+":"+state.SessionId,revision=state.Revision,states=state.States}};
             },cancel);
         }finally{gate.Release();}
@@ -149,18 +152,44 @@ public sealed class RecordingReplay {
     private static long Millis(JsonNode? value)=>DateTimeOffset.Parse(value?.GetValue<string>()??throw new InvalidDataException("Missing journal time.")).ToUnixTimeMilliseconds();
     public sealed class ReplayState {
         public JsonObject States {get;set;}=new();public string SessionId {get;set;}="";public long Revision {get;set;}public long LastTelemetryAt {get;set;}public long? GapStart {get;set;}
+        public sealed record ThermalPoint(
+            [property:System.Text.Json.Serialization.JsonPropertyName("at")] long At,
+            [property:System.Text.Json.Serialization.JsonPropertyName("temperature")] double? Temperature,
+            [property:System.Text.Json.Serialization.JsonPropertyName("power")] double? Power);
+        public List<ThermalPoint> CameraThermal {get;set;}=new();
+        public string ThermalContext {get;set;}="";
+        private void ObserveCamera(long at,bool gap=false) {
+            var camera=States["camera"]?["value"];
+            var selected=(States["devices"]?["value"]?["items"] as JsonArray)?.OfType<JsonObject>().FirstOrDefault(d=>d["device"]?.GetValue<string>()=="camera"&&d["selected"]?.GetValue<bool>()==true);
+            var context=SessionId+"/"+States["administration"]?["value"]?["profile"]?["id"]?.GetValue<string>()+"/"+(selected?["id"]?.GetValue<string>()??camera?["name"]?.GetValue<string>());
+            if(context!=ThermalContext){CameraThermal.Clear();ThermalContext=context;}
+            CameraThermal.RemoveAll(s=>s.At<at-3600000);
+            var connected=!gap&&camera?["connected"]?.GetValue<bool>()==true;
+            double? Number(string key)=>camera?[key] is JsonValue v&&v.TryGetValue<double>(out var n)&&double.IsFinite(n)?n:null;
+            var temperature=connected?Number("temperature"):null;var power=connected?Number("coolerPower"):null;
+            if(power is <0 or >100)power=null;
+            var last=CameraThermal.LastOrDefault();
+            if(last is not null&&at-last.At<5000){
+                // A disconnect/gap must break the line even inside the sample interval.
+                if(temperature is null&&power is null&&(last.Temperature is not null||last.Power is not null))CameraThermal.Add(new(at,null,null));
+                return;
+            }
+            CameraThermal.Add(new(at,temperature,power));
+            if(CameraThermal.Count>720)CameraThermal.RemoveRange(0,CameraThermal.Count-720);
+        }
         public string TimingScope {get;set;}="";public bool TimingBaseline {get;set;}=true;
         public Dictionary<string,StepObservation> Timings {get;set;}=new();
         public sealed class StepObservation {public string State {get;set;}="";public string? Started {get;set;}public string? Ended {get;set;}public string? Seen {get;set;}}
         public void Apply(JsonObject row) {
             var kind=row["kind"]?.GetValue<string>();var at=Millis(row["receivedAt"]);
-            if(kind=="gap-start"){GapStart=at;TimingBaseline=true;return;}if(kind=="gap-end"){GapStart=null;return;}
+            if(kind=="gap-start"){ObserveCamera(at,true);GapStart=at;TimingBaseline=true;return;}if(kind=="gap-end"){GapStart=null;return;}
             if(kind is not ("checkpoint" or "update"))return;
             var data=row["data"]!;if(kind=="checkpoint")States=new();
             foreach(var pair in data["states"]!.AsObject())States[pair.Key]=pair.Value?.DeepClone();
             foreach(var key in data["removed"]?.AsArray()??new JsonArray())States.Remove(key!.GetValue<string>());
             SessionId=data["sessionId"]!.GetValue<string>();Revision=data["revision"]!.GetValue<long>();LastTelemetryAt=at;
             if(data["states"]?["sequence"] is not null)ObserveSteps(at);
+            if(kind=="checkpoint"||data["states"]?["camera"] is not null||(data["removed"] as JsonArray)?.Any(k=>k?.GetValue<string>()=="camera")==true)ObserveCamera(at);
         }
         private void ObserveSteps(long at) {
             var sequence=States["sequence"]?["value"];var scope=SessionId+"/"+sequence?["sequenceId"]?.GetValue<string>();

@@ -1,3 +1,5 @@
+import {nightTimeline,renderNightTimeline,updateNightTimelineClock} from "./sequence-night-timeline";
+import {sequenceImagingProgress} from "./sequence-imaging-progress";
 import {timedCountdownElement} from './sequence-clock';
 import {sequenceName,sequenceDetail,type CoolingContext} from "./sequence-presentation";
 import type {Site} from "./target-visibility";
@@ -61,9 +63,20 @@ let sequenceScrollRestore:{frame:number;top:number}|undefined;
 function cancelSequenceScrollRestore(){if(sequenceScrollRestore)cancelAnimationFrame(sequenceScrollRestore.frame);sequenceScrollRestore=undefined;}
 let sequenceViewRefresh = () => {};
 let jumpToCurrent = () => {};
+let lastAutoCenteredStep = "";
 let treeSignature = "",
   previewRevision = "",
   histogramValues: number[] = [];
+let previewBrightening = true;
+function updatePreviewTreatment(){
+  const image=node<HTMLImageElement>("latest-preview"),thumb=node<HTMLImageElement>("last-preview");
+  const dark=image.dataset.darkAutofocus==="true";
+  const filter=dark&&previewBrightening?"brightness(8) contrast(1.15)":"";
+  image.style.filter=filter;thumb.style.filter=filter;
+  const button=document.getElementById("image-brighten");
+  if(button){button.hidden=!dark;button.setAttribute("aria-pressed",String(previewBrightening));}
+  text("image-caption",(image.dataset.previewCaption??"")+(filter?" · brightened for display":""));
+}
 const collapsed = new Set<string>();
 let cachedSession = "";
 let exposure: { end: number; duration: number } | null = null;
@@ -110,7 +123,18 @@ export function mountDashboard() {
   jump.id = "jump-current"; jump.type = "button"; jump.textContent = "Current step";
   jump.title = "Jump to the current instruction or waiting step";
   jump.onclick = () => jumpToCurrent();
-  node("sequence-title-actions").append(jump, expand);
+  const summaryToggle = document.createElement("button");
+  summaryToggle.id = "sequence-summary-toggle"; summaryToggle.type = "button";
+  summaryToggle.textContent = "Hide summary";
+  summaryToggle.setAttribute("aria-expanded", "true");
+  summaryToggle.setAttribute("aria-label", "Hide sequence summary and controls");
+  summaryToggle.onclick = () => {
+    const hidden = panel.classList.toggle("summary-collapsed");
+    summaryToggle.textContent = hidden ? "Show summary" : "Hide summary";
+    summaryToggle.setAttribute("aria-expanded", String(!hidden));
+    summaryToggle.setAttribute("aria-label", (hidden ? "Show" : "Hide") + " sequence summary and controls");
+  };
+  node("sequence-title-actions").append(summaryToggle, jump, expand);
   expand.onclick = () => setExpanded(!panel.classList.contains("is-expanded"));
   document.addEventListener("keydown", e => {
     if (e.key === "Escape" && panel.classList.contains("is-expanded")
@@ -120,6 +144,10 @@ export function mountDashboard() {
   });
   setExpanded(false);
   const image = node<HTMLImageElement>("latest-preview");
+  const brighten=document.createElement("button");brighten.id="image-brighten";brighten.textContent="Brighten";brighten.hidden=true;
+  brighten.title="Brighten dark autofocus previews for viewing. Saved images are unchanged.";
+  brighten.onclick=()=>{previewBrightening=!previewBrightening;updatePreviewTreatment();};
+  node("image-fit").before(brighten);
   image.onload = () => {
     const canvas = document.createElement("canvas");
     canvas.width = 160;
@@ -134,6 +162,9 @@ export function mountDashboard() {
         0.2126 * rgba[i] + 0.7152 * rgba[i + 1] + 0.0722 * rgba[i + 2];
       histogramValues[Math.min(63, Math.floor(lum / 4))]++;
     }
+    const low=histogramValues.slice(0,3).reduce((a,b)=>a+b,0)/16000;
+    image.dataset.darkAutofocus=String(image.dataset.autofocusPreview==="true"&&low>.99);
+    updatePreviewTreatment();
     renderHistogram();
   };
   image.onerror = () => {
@@ -175,7 +206,7 @@ function renderHistogram() {
       x: "150",
       y: "52",
       "text-anchor": "middle",
-      fill: "#61788d",
+      fill: "var(--dim)",
       "font-size": "10",
     });
     t.textContent = "Histogram available with preview";
@@ -192,7 +223,7 @@ function renderHistogram() {
   svg.append(
     svgElement("path", {
       d: `M0,95 ${d.replace("M", "L")} L300,95 Z`,
-      fill: "#7895a9",
+      fill: "var(--muted)",
       opacity: ".8",
     }),
   );
@@ -226,7 +257,7 @@ function plot(id: string, series: number[][][], focus = false) {
         x2: "452",
         y1: String(y),
         y2: String(y),
-        stroke: "#293d4b",
+        stroke: "var(--chart-grid, #293d4b)",
         "stroke-width": ".8",
       }),
     );
@@ -234,7 +265,7 @@ function plot(id: string, series: number[][][], focus = false) {
       x: "29",
       y: String(y + 3),
       "text-anchor": "end",
-      fill: "#90a6b8",
+      fill: "var(--chart-label, #90a6b8)",
       "font-size": "9",
     });
     t.textContent = format(maxY - (i * (maxY - minY)) / 4, 1);
@@ -248,7 +279,7 @@ function plot(id: string, series: number[][][], focus = false) {
         x2: String(x),
         y1: "12",
         y2: "120",
-        stroke: "#293d4b",
+        stroke: "var(--chart-grid, #293d4b)",
         "stroke-width": ".6",
       }),
     );
@@ -256,7 +287,7 @@ function plot(id: string, series: number[][][], focus = false) {
       x: String(x),
       y: "138",
       "text-anchor": "middle",
-      fill: "#90a6b8",
+      fill: "var(--chart-label, #90a6b8)",
       "font-size": "8",
     });
     t.textContent = points.length
@@ -271,7 +302,7 @@ function plot(id: string, series: number[][][], focus = false) {
       x: "244",
       y: "69",
       "text-anchor": "middle",
-      fill: "#718b9f",
+      fill: "var(--muted)",
       "font-size": "11",
     });
     t.textContent = focus
@@ -295,7 +326,7 @@ function plot(id: string, series: number[][][], focus = false) {
     svg.append(
       svgElement("path", {
         d,
-        stroke: focus ? "#39d9c5" : i ? "#ee839b" : "#5297ff",
+        stroke: focus ? "var(--accent)" : i ? "var(--chart-dec, #ee839b)" : "var(--chart-ra, #5297ff)",
         "stroke-width": "1.6",
         fill: "none",
       }),
@@ -308,8 +339,8 @@ function plot(id: string, series: number[][][], focus = false) {
             cx: String(x),
             cy: String(y),
             r: "3",
-            fill: "#39d9c5",
-            stroke: "#10242a",
+            fill: "var(--accent)",
+            stroke: "var(--surface)",
             "stroke-width": "1.5",
           }),
         );
@@ -357,6 +388,7 @@ function renderSequence(
   cooling: CoolingContext = {},
   profileId?:string,
   observedAt?:string,
+  followActive=false,
 ) {
   const nodes = [...(Array.isArray(sequence.nodes) ? sequence.nodes : [])] as SequenceNode[];
   if (sequence.mode !== "simple") {
@@ -369,8 +401,16 @@ function renderSequence(
   }
   const root = nodes.find((n) => n.type === "SequenceRootContainer");
   const instructions = nodes.filter((n) => n.kind === "instruction");
-  const completed = instructions.filter((n) => n.state === "completed").length;
+  const imaging = sequenceImagingProgress(nodes, sequence.truncated === true);
   const active = currentSequenceNode(nodes, sequence.activeNodeIds);
+  const replay = document.body.classList.contains("replay-mode");
+  const focusKey = live && active
+    ? JSON.stringify([replay, session, sequence.executionId, active.id]) : "";
+  // Live follows each new executing step once, leaving manual scrolling alone
+  // between transitions. Replay keeps its explicit Follow behavior.
+  const autoCenter = followActive && !!focusKey && (replay || focusKey !== lastAutoCenteredStep);
+  if (!focusKey) lastAutoCenteredStep = "";
+  if(autoCenter&&active)for(const id of sequenceAncestors(nodes,active.id))collapsed.delete(id);
   text("target-title", targetName(nodes));
   node("target-title").hidden = !targetName(nodes);
   text("preview-target", targetName(nodes) ? "— " + targetName(nodes) : "");
@@ -386,22 +426,20 @@ function renderSequence(
             : "Loaded sequence"
       : (sequence.reason ?? "Waiting for sequence"),
   );
-  text(
-    "sequence-coverage",
-    instructions.length
-      ? `${completed} / ${instructions.length} steps complete`
-      : "No instructions loaded",
-  );
-  const pct = instructions.length
-    ? Math.round((completed / instructions.length) * 100)
-    : 0;
-  text("sequence-percent", instructions.length ? pct + "%" : "—");
-  node("sequence-progress").style.width = pct + "%";
-  node("sequence-progress").parentElement!.setAttribute(
-    "aria-valuenow",
-    String(pct),
-  );
-  node("sequence-progress").parentElement!.setAttribute("aria-valuemax", "100");
+  text("sequence-coverage", imaging.label);
+  text("sequence-percent", imaging.percent === null ? "" : imaging.percent + "%");
+  const progress = node("sequence-progress");
+  const track = progress.parentElement!;
+  track.hidden = imaging.percent === null;
+  progress.style.width = (imaging.percent ?? 0) + "%";
+  track.setAttribute("aria-label", "Images taken against planned exposures");
+  if (imaging.percent === null) track.removeAttribute("aria-valuenow");
+  else track.setAttribute("aria-valuenow", String(imaging.percent));
+  track.setAttribute("aria-valuemax", "100");
+  const nightWindows = imaging.planned === null && observedAt && site?.timeZone
+    ? nightTimeline(nodes, observedAt, site.timeZone, sequence.truncated === true) : [];
+  renderNightTimeline(nightWindows, observedAt ?? "", site?.timeZone ?? "UTC", live);
+
   text(
     "sequence-running",
     !live
@@ -428,7 +466,7 @@ function renderSequence(
     collapsed.clear();
     if (!allCollapsed) for (const group of groups) collapsed.add(group.id);
     treeSignature = "";
-    renderSequence(sequence, live, session, site, cooling, profileId, observedAt);
+    renderSequence(sequence, live, session, site, cooling, profileId, observedAt, followActive);
   };
   const index = nodes.findIndex((n) => n.id === active?.id);
   const upcoming = nodes
@@ -446,6 +484,7 @@ function renderSequence(
   );
   text("sequence-freshness", live ? "" : "Offline");
   node<HTMLButtonElement>("jump-current").disabled = !active || !live;
+  node<HTMLButtonElement>("jump-current").title = !live ? "Current step unavailable while offline" : !active ? "Current step not reported in the available sequence" : "Jump to the current step";
   jumpToCurrent = () => {
     if (!active || !live) return;
     for (const id of sequenceAncestors(nodes, active.id)) collapsed.delete(id);
@@ -455,12 +494,18 @@ function renderSequence(
     cancelSequenceScrollRestore();
     row?.scrollIntoView({block: "center", behavior: "smooth"});
   };
-  sequenceViewRefresh = () => renderSequence(sequence, live, session, site, cooling, profileId, observedAt);
+  sequenceViewRefresh = () => renderSequence(sequence, live, session, site, cooling, profileId, observedAt, followActive);
   const expanded = document.querySelector(".sequence-panel")!.classList.contains("is-expanded");
-  const signature = JSON.stringify([session, live, nodes, site, cooling, profileId, expanded, [...collapsed]]);
-  if (signature === treeSignature) return;
-  treeSignature = signature;
   const tree = node("sequence-tree");
+  const centerActive=()=>{
+    if(autoCenter&&active)requestAnimationFrame(()=>{
+      const row=[...tree.querySelectorAll<HTMLElement>('[data-node-id]')].find(r=>r.dataset.nodeId===active.id);
+      if(row){const frame=tree.getBoundingClientRect(),rect=row.getBoundingClientRect();tree.scrollTop+=rect.top-frame.top-(tree.clientHeight-rect.height)/2;lastAutoCenteredStep=focusKey;}
+    });
+  };
+  const signature = JSON.stringify([session, live, nodes, site, cooling, profileId, expanded, followActive, [...collapsed]]);
+  if (signature === treeSignature) {centerActive();return;}
+  treeSignature = signature;
   const scroll = sequenceScrollRestore?.top ?? tree.scrollTop;
   cancelSequenceScrollRestore();
   renderSequenceView(tree, nodes, {
@@ -468,16 +513,18 @@ function renderSequence(
     toggle(id) {
       collapsed.has(id) ? collapsed.delete(id) : collapsed.add(id);
       treeSignature = "";
-      renderSequence(sequence, live, session, site, cooling, profileId, observedAt);
+      renderSequence(sequence, live, session, site, cooling, profileId, observedAt, followActive);
     },
   });
   tree.scrollTop = scroll;
   // The editor adds insertion lines in its MutationObserver microtask. Restore
   // again before paint, after those lines have restored the full tree height.
   sequenceScrollRestore={top:scroll,frame:requestAnimationFrame(()=>{tree.scrollTop=scroll;sequenceScrollRestore=undefined;})};
+  centerActive();
 
 }
 export function updateExposureClock(live = true, now=Date.now()) {
+  updateNightTimelineClock(live,now);
   const sequenceProgress=document.getElementById("sequence-exposure-inline");
   if(sequenceProgress)sequenceProgress.hidden=!exposure||!live;
   if (!exposure) return;
@@ -513,6 +560,7 @@ export function renderDashboard(
   live: boolean,
   session: string,
   now=Date.now(),
+  followActive=false,
 ) {
   if (cachedSession !== session) {
     collapsed.clear();
@@ -556,20 +604,15 @@ export function renderDashboard(
     vals.replaceChildren();
     const s = connected ? state : {};
     if (key === "camera") {
-      const primary = document.createElement("div");
-      primary.className = "primary-reading";
-      primary.textContent = format(s.temperature, 1, "°C");
-      const small = document.createElement("small");
-      small.textContent = `target ${format(s.temperatureSetPoint, 0, "°C")}`;
-      primary.append(small);
-      const dl = document.createElement("dl");
-      dl.className = "compact-readings";
-      readings(dl, {
-        Cooler: format(s.coolerPower, 0, "%"),
-        Gain: format(s.gain, 0),
-        Bin: numeric(s.binX) && numeric(s.binY) ? `${s.binX}×${s.binY}` : "—",
-      });
-      vals.append(primary, dl);
+      vals.classList.add("camera-temperature-pair");
+      const current = document.createElement("div");current.className="primary-reading";
+      current.dataset.cameraTemperature="";current.textContent=format(s.temperature,1,"°C");
+      const currentLabel=document.createElement("small");currentLabel.textContent="Current";current.append(currentLabel);
+      const delta=document.createElement("div");delta.className="primary-reading";delta.dataset.cameraDelta="";
+      const difference=numeric(s.temperature)&&numeric(s.temperatureSetPoint)?Math.round((s.temperature-s.temperatureSetPoint)*10)/10:null;
+      delta.textContent=difference===null?"—":`${difference>0?"+":""}${Object.is(difference,-0)?"0.0":difference.toFixed(1)}°C`;
+      const deltaLabel=document.createElement("small");deltaLabel.textContent=`Δ to ${format(s.temperatureSetPoint,1,"°C")}`;delta.append(deltaLabel);
+      vals.append(current,delta);
     } else if (key === "mount") {
       const dl = document.createElement("dl");
       dl.className = "compact-readings mount-readings";
@@ -615,7 +658,8 @@ export function renderDashboard(
     const t=states[name],v=t?.value;
     return live && v?.connected===true && t && now-Date.parse(t.observedAt)<60000 && typeof v.temperature==='number' && Number.isFinite(v.temperature)?v.temperature:undefined;
   };
-  renderSequence(value("sequence"), live, session, site?.timeZone ? site : undefined,{focuserTemperature:temperature('focuser'),weatherTemperature:temperature('weather')},(value('administration').profile as {id?:string}|undefined)?.id,states.sequence?.observedAt);
+  renderSequence(value("sequence"), live, session, site?.timeZone ? site : undefined,{focuserTemperature:temperature('focuser'),weatherTemperature:temperature('weather')},(value('administration').profile as {id?:string}|undefined)?.id,states.sequence?.observedAt,followActive);
+  updateNightTimelineClock(live,now);
   for(const item of (value("sequence").nodes??[]) as SequenceNode[]){
     if(item.type!=="TimeCondition"&&item.type!=="WaitForTime")continue;
     const row=[...node("sequence-tree").querySelectorAll<HTMLElement>('[data-node-id]')].find(row=>row.dataset.nodeId===item.id);
@@ -629,8 +673,10 @@ export function renderDashboard(
   const thumbnail = node<HTMLImageElement>("last-preview");
   const revision = `${session}:${preview.revision}`;
   if (typeof preview.jpeg === "string" && preview.jpeg) {
-    if (revision !== previewRevision) {
+    if (revision !== previewRevision || !img.getAttribute("src")) {
       previewRevision = revision;
+      img.dataset.autofocusPreview=String(value("autofocus").running===true);
+      img.dataset.darkAutofocus="false";
       img.src = "data:image/jpeg;base64," + preview.jpeg;
       thumbnail.src = img.src;
     }
@@ -638,6 +684,7 @@ export function renderDashboard(
     thumbnail.hidden = false;
     node("image-empty").hidden = true;
   } else {
+    previewRevision="";img.dataset.autofocusPreview="false";img.dataset.darkAutofocus="false";
     img.hidden = true;
     thumbnail.hidden = true;
     thumbnail.removeAttribute("src");
@@ -653,18 +700,12 @@ export function renderDashboard(
     "image-fullscreen",
   ])
     node<HTMLButtonElement>(id).disabled = !preview.jpeg;
-  text(
-    "image-caption",
-    image.filename
-      ? `${image.filename}${live ? "" : " · cached"}`
-      : "No image received in this plugin session",
-  );
-  text(
-    "image-dimensions",
-    numeric(image.width) && numeric(image.height)
-      ? `${image.width} × ${image.height}`
-      : "—",
-  );
+  const focusPreview=img.dataset.autofocusPreview==="true"&&!!preview.jpeg;
+  img.dataset.previewCaption=preview.jpeg
+    ? focusPreview?"Autofocus preview":image.filename?`${image.filename}${live?"":" · cached"}`:"Prepared image preview"
+    : document.body.classList.contains("replay-mode")?"No recorded image at this time":"No image received in this plugin session";
+  updatePreviewTreatment();
+  text("image-dimensions",numeric(preview.width)&&numeric(preview.height)?`${preview.width} × ${preview.height}`:numeric(image.width)&&numeric(image.height)?`${image.width} × ${image.height}`:"—");
   const download = node<HTMLAnchorElement>("image-download");
   download.hidden = !live || typeof image.id !== "string";
   if (typeof image.id === "string") {
@@ -851,7 +892,11 @@ export function renderRoofStatus(states: Record<string, Topic>, live: boolean) {
   const safety = states.safety?.value;
   const known = live && safety?.connected === true && typeof safety.isSafe === "boolean";
   const state = known ? (safety!.isSafe ? "open" : "closed") : "unknown";
-  const label = "Roof " + state;
+  const label = known ? (safety!.isSafe ? "Roof open · Safety safe" : "Roof closed · Safety unsafe") : "Roof & safety unknown";
   if (badge.textContent !== label) badge.textContent = label;
   badge.className = "roof-status roof-" + state;
+  let sequenceBadge = document.getElementById("sequence-roof-status");
+  if (!sequenceBadge) { sequenceBadge = document.createElement("span"); sequenceBadge.id = "sequence-roof-status"; sequenceBadge.setAttribute("aria-live", "polite"); node("sequence-title-actions").prepend(sequenceBadge); }
+  sequenceBadge.textContent = label;
+  sequenceBadge.className = "roof-status roof-" + state;
 }

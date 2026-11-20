@@ -29,11 +29,24 @@ APNs acceptance/failure outcomes. Accepted-by-Apple is not proof of phone displa
 Foreground/tap callbacks record received-in-app/opened-on-phone. Interrupted or
 failed sends are not blindly replayed. Network failure cannot fail a sequence.
 
-At most32 previews of100KB each are retained for2 hours behind192-bit random
-media capabilities; preview content is the latest pushed camera preview, not a
-processed stack or a guaranteed filename-matched raw frame. The iOS service
-extension accepts only this exact HTTPS host/path and gracefully keeps text when
-a preview expires or a service restart clears the cache.
+Up to512 previews of100KB each are retained on private disk for7 days behind
+192-bit random media capabilities; the oldest is evicted if the item limit is
+reached. Capability keys and original JPEG bytes survive gateway restarts. The
+index is mode0600 inside a0700 directory. Preview content remains the latest
+pushed camera preview, not a processed stack or a guaranteed filename-matched
+raw frame. The iOS service extension accepts only this exact HTTPS host/path.
+The app first uses the original iOS notification attachment or its bounded
+on-device JPEG cache, then the server. Expired server-only images cannot be
+recreated after their original attachment is gone.
+
+Notification copies use a gentler midtones curve: a20% input level maps to8%,
+with black and white endpoints preserved and no additional shadow clipping.
+The service transforms only the bounded pushed JPEG, once per fresh preview,
+using SkiaSharp3.119.4. Inputs must be JPEG, at most100KB and800px per dimension;
+output remains at most100KB. Invalid previews are omitted. This changes neither
+FITS, N.I.N.A. stretch/capture settings nor dashboard JPEGs. Existing notification
+attachments/cache entries retain their original bytes; new notifications use
+the darker copy. No denoising or stack processing is applied.
 
 The iOS source remains in Starfront Operations/apps/StarfrontIOS. Its original
 bundle/team/rig Keychain identity are preserved; notification credentials have a

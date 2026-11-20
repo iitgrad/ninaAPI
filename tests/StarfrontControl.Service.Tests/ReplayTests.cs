@@ -55,5 +55,75 @@ public sealed class ReplayTests:IDisposable {
   Assert.Throws<ArgumentException>(()=>new RecordingReplay(Root,Path.Combine(Root,"cache")));
   Assert.Throws<ArgumentException>(()=>new RecordingReplay(Root,dir));
  }
+ [Fact]public async Task BackgroundIndexAppearsAfterFinishWithoutOpeningReplay(){
+  Write(Frame("checkpoint",0,new {camera=new {value=new {connected=true}}}));
+  var path=Path.Combine(Folder,"manifest.json");var meta=JsonNode.Parse(File.ReadAllText(path))!;
+  meta["state"]="recording";File.WriteAllText(path,meta.ToJsonString());
+  var original=File.ReadAllBytes(Path.Combine(Folder,"events-000001.ndjson.gz"));
+  var worker=new ReplayIndexWarmup(Reader(),Microsoft.Extensions.Logging.Abstractions.NullLogger<ReplayIndexWarmup>.Instance);
+  await worker.StartAsync(default);
+  try {
+   await Task.Delay(600);Assert.False(Directory.Exists(Path.Combine(Cache,id)));
+   meta["state"]="completed";File.WriteAllText(path+".tmp",meta.ToJsonString());File.Move(path+".tmp",path,true);
+   var ready=Path.Combine(Cache,id,"index.json");var deadline=DateTime.UtcNow.AddSeconds(10);
+   while(!File.Exists(ready)&&DateTime.UtcNow<deadline)await Task.Delay(50);
+   Assert.True(File.Exists(ready));Assert.Equal(original,File.ReadAllBytes(Path.Combine(Folder,"events-000001.ndjson.gz")));
+  } finally {await worker.StopAsync(default);worker.Dispose();}
+ }
+ [Fact]public async Task StartupWarmsOnlyLatestTwoAndLeavesUnchangedCacheAlone(){
+  Write(Frame("checkpoint",0,new {}));
+  var ids=new[]{id,Guid.NewGuid().ToString(),Guid.NewGuid().ToString()};
+  for(int i=1;i<ids.Length;i++) {
+   var dest=Path.Combine(Root,ids[i]);Directory.CreateDirectory(dest);
+   File.Copy(Path.Combine(Folder,"events-000001.ndjson.gz"),Path.Combine(dest,"events-000001.ndjson.gz"));
+   var m=JsonNode.Parse(File.ReadAllText(Path.Combine(Folder,"manifest.json")))!;m["id"]=ids[i];m["finishedAt"]=Stamp(300000+i*60000);File.WriteAllText(Path.Combine(dest,"manifest.json"),m.ToJsonString());
+  }
+  var worker=new ReplayIndexWarmup(Reader(),Microsoft.Extensions.Logging.Abstractions.NullLogger<ReplayIndexWarmup>.Instance);
+  await worker.Refresh();Assert.False(Directory.Exists(Path.Combine(Cache,id)));
+  Assert.Equal(2,Directory.GetDirectories(Cache).Length);
+  var ready=Path.Combine(Cache,ids[2],"index.json");var before=File.GetLastWriteTimeUtc(ready);
+  await worker.Refresh();Assert.Equal(before,File.GetLastWriteTimeUtc(ready));worker.Dispose();
+ }
+ [Fact]public async Task BadRecordingDoesNotPreventGoodRecordingFromBeingPrepared(){
+  Write(Frame("checkpoint",0,new {}));
+  var bad=Guid.NewGuid().ToString();var dest=Path.Combine(Root,bad);Directory.CreateDirectory(dest);
+  var m=JsonNode.Parse(File.ReadAllText(Path.Combine(Folder,"manifest.json")))!;m["id"]=bad;m["finishedAt"]=Stamp(360000);File.WriteAllText(Path.Combine(dest,"manifest.json"),m.ToJsonString());
+  File.WriteAllText(Path.Combine(dest,"events-000001.ndjson.gz"),"not gzip");
+  var worker=new ReplayIndexWarmup(Reader(),Microsoft.Extensions.Logging.Abstractions.NullLogger<ReplayIndexWarmup>.Instance);
+  await worker.Refresh();Assert.True(File.Exists(Path.Combine(Cache,id,"index.json")));Assert.False(Directory.Exists(Path.Combine(Cache,bad)));worker.Dispose();
+ }
+ [Fact]public async Task ThermalHistoryIsAvailableOnDirectSeekAndNeverIncludesFutureSamples(){
+  object Camera(double temperature,double power,bool connected=true)=>new {camera=new {value=new {connected,name="Camera",temperature,coolerPower=power}}};
+  Write(Frame("checkpoint",0,Camera(20,0)),Frame("update",10000,Camera(10,70)),Frame("update",70000,Camera(-5,90)),new {kind="gap-start",receivedAt=Stamp(80000),data=new {}},new {kind="gap-end",receivedAt=Stamp(100000),data=new {}},Frame("checkpoint",100000,Camera(-10,40)));
+  var reader=Reader();await reader.Index(id); // Checkpoint seed must retain earlier camera samples.
+  var seek=await At(reader,75000);var samples=seek["cameraThermal"]!.AsArray();
+  Assert.Equal(3,samples.Count);Assert.Equal(20,samples[0]!["temperature"]!.GetValue<double>());
+  Assert.Equal(-5,samples[2]!["temperature"]!.GetValue<double>());
+  Assert.Equal(2,(await At(reader,15000))["cameraThermal"]!.AsArray().Count);
+  Assert.Null((await At(reader,85000))["cameraThermal"]!.AsArray().Last()!["temperature"]);
+  Assert.Equal(-10,(await At(reader,110000))["cameraThermal"]!.AsArray().Last()!["temperature"]!.GetValue<double>());
+ }
+ [Fact]public async Task ThermalHistoryIsBoundedAndCameraSessionChangeResetsIt(){
+  var state=new RecordingReplay.ReplayState();
+  for(int i=0;i<1000;i++) {
+   var row=JsonSerializer.SerializeToNode(Frame("update",i*5000,new {camera=new {value=new {connected=true,name="Camera",temperature=10,coolerPower=30}}}))!.AsObject();state.Apply(row);
+  }
+  Assert.InRange(state.CameraThermal.Count,1,720);
+  var next=JsonSerializer.SerializeToNode(Frame("checkpoint",5000000,new {camera=new {value=new {connected=true,name="Camera",temperature=5,coolerPower=40}}}))!.AsObject();next["data"]!["sessionId"]="new-session";state.Apply(next);Assert.Single(state.CameraThermal);
+ }
+ [Fact]public async Task AutofocusImagesReplayInOrderWithoutAnImageSavedEvent(){
+  var a=new string('a',64);var b=new string('b',64);
+  object Focus(string file,long revision)=>new {autofocus=new {value=new {running=true,points=new[]{new {position=35000,hfr=3.0}}}},preview=new {value=new {revision,recordingFile="previews/"+file+".jpg"}}};
+  Write(Frame("checkpoint",0,Focus(a,1)),Frame("update",10000,Focus(b,2)));
+  var folder=Path.Combine(Folder,"previews");Directory.CreateDirectory(folder);
+  byte[] first=[255,216,1,255,217],second=[255,216,2,255,217];File.WriteAllBytes(Path.Combine(folder,a+".jpg"),first);File.WriteAllBytes(Path.Combine(folder,b+".jpg"),second);
+  var reader=Reader();
+  foreach(var (offset,bytes) in new[]{(0L,first),(5000L,first),(10000L,second),(15000L,second),(0L,first)}) {
+   var frame=await At(reader,offset);var states=frame["snapshot"]!["states"]!;
+   Assert.True(states["autofocus"]!["value"]!["running"]!.GetValue<bool>());
+   Assert.Equal(Convert.ToBase64String(bytes),states["preview"]!["value"]!["jpeg"]!.GetValue<string>());
+   Assert.Null(states["image"]);
+  }
+ }
  public void Dispose(){if(Directory.Exists(dir))Directory.Delete(dir,true);}
 }

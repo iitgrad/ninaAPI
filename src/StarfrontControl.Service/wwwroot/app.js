@@ -1,6 +1,221 @@
+// web/telemetry-connection.ts
+function createTelemetryConnection(options) {
+  let socket = null;
+  let timer;
+  let retry = 1000, lastMessage = 0, lastResume = -Infinity, started = false, renewing = false;
+  const now = options.now ?? Date.now;
+  function retire() {
+    const old = socket;
+    socket = null;
+    if (old) {
+      old.onopen = old.onmessage = old.onclose = old.onerror = null;
+      old.close();
+    }
+    options.state(false);
+  }
+  function schedule() {
+    if (timer !== undefined || renewing)
+      return;
+    retire();
+    timer = (options.delay ?? setTimeout)(() => {
+      timer = undefined;
+      reconnect();
+    }, retry);
+    retry = Math.min(1e4, retry * 2);
+  }
+  async function reconnect() {
+    if (renewing)
+      return;
+    renewing = true;
+    try {
+      await options.renew();
+      open();
+    } catch {} finally {
+      renewing = false;
+      if (!socket)
+        schedule();
+    }
+  }
+  function open() {
+    try {
+      const next = (options.socket ?? ((url) => new WebSocket(url)))(options.url());
+      socket = next;
+      lastMessage = now();
+      next.onopen = () => {
+        if (socket === next)
+          options.state(true);
+      };
+      next.onmessage = (event) => {
+        if (socket !== next)
+          return;
+        if (options.receive(String(event.data))) {
+          lastMessage = now();
+          retry = 1000;
+        }
+      };
+      next.onclose = next.onerror = () => {
+        if (socket === next)
+          schedule();
+      };
+    } catch {
+      schedule();
+    }
+  }
+  return {
+    start() {
+      if (!started) {
+        started = true;
+        open();
+      }
+    },
+    check() {
+      if (started && socket && now() - lastMessage >= 30000)
+        schedule();
+    },
+    resume() {
+      if (!started || renewing || timer !== undefined || now() - lastResume < 1000)
+        return;
+      lastResume = now();
+      retire();
+      reconnect();
+    }
+  };
+}
+
+// web/bulk-connections.ts
+var order = ["camera", "filterWheel", "focuser", "rotator", "mount", "guider", "dome", "flatDevice", "switch", "weather"];
+function connectionCandidates(states, action) {
+  const choices = states.devices?.value.items ?? [];
+  return (action === "connect" ? order : [...order].reverse()).flatMap((device) => {
+    const choice = choices.find((c) => c.device === device && c.selected && c.allowed && c.id && !["No_Device", "No_Guider"].includes(c.id));
+    if (!choice)
+      return [];
+    if (action === "connect" && device === "weather" && choice.id === "ASCOM.Device1.ObservingConditions" && choice.name?.includes("Pegasus"))
+      return [];
+    const connected = states[device]?.value.connected;
+    return connected === (action === "disconnect") ? [choice] : [];
+  });
+}
+function mountBulkConnections(api) {
+  const toolbar = document.createElement("div");
+  toolbar.className = "equipment-bulk-actions";
+  toolbar.style.cssText = "display:flex;align-items:center;gap:6px";
+  const buttons = ["connect", "disconnect"].map((action) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.id = "equipment-" + action + "-all";
+    button.textContent = action === "connect" ? "Connect All" : "Disconnect All";
+    button.onclick = () => confirmAction(action);
+    toolbar.append(button);
+    return button;
+  });
+  document.querySelector(".header-right").prepend(toolbar);
+  const dialog = document.createElement("dialog");
+  dialog.className = "parameter-dialog";
+  dialog.setAttribute("aria-labelledby", "bulk-confirm-title");
+  dialog.innerHTML = '<h2 id="bulk-confirm-title"></h2><div class="device-action-row"><button data-cancel>Cancel</button><button data-confirm></button></div>';
+  document.body.append(dialog);
+  dialog.querySelector("[data-cancel]").onclick = () => dialog.close();
+  let running = false;
+  function identity() {
+    return JSON.stringify([api.session(), api.states().administration?.value.profile?.id]);
+  }
+  function available(action) {
+    const candidates = connectionCandidates(api.states(), action);
+    return candidates.length > 0 && candidates.every((c) => !api.reason(c.device, action));
+  }
+  function update() {
+    toolbar.hidden = api.replay();
+    buttons.forEach((b, i) => b.disabled = running || !available(i === 0 ? "connect" : "disconnect"));
+  }
+  function confirmAction(action) {
+    if (running || !available(action))
+      return;
+    const candidates = connectionCandidates(api.states(), action), context = identity();
+    document.getElementById("bulk-confirm-title").textContent = action === "connect" ? "Connect all equipment?" : "Disconnect all equipment?";
+    const confirm = dialog.querySelector("[data-confirm]");
+    confirm.textContent = action === "connect" ? "Connect All" : "Disconnect All";
+    confirm.onclick = () => {
+      dialog.close();
+      execute(action, candidates, context);
+    };
+    dialog.showModal();
+  }
+  async function execute(action, candidates, context) {
+    if (running)
+      return;
+    running = true;
+    api.busy(true);
+    update();
+    try {
+      for (const c of candidates) {
+        if (identity() !== context || api.replay())
+          throw Error("Connection or profile changed.");
+        const selected = (api.states().devices?.value.items ?? []).find((x) => x.device === c.device && x.selected);
+        if (selected?.id !== c.id)
+          throw Error("Configured equipment changed.");
+        if (api.states()[c.device]?.value.connected === (action === "connect"))
+          continue;
+        const reason = api.reason(c.device, action);
+        if (reason)
+          throw Error(reason);
+        const id = await api.send(c.device, action, c.id);
+        if (!id)
+          throw Error("Command was not submitted.");
+        const deadline = Date.now() + 90000;
+        let completed = false;
+        while (Date.now() < deadline) {
+          if (identity() !== context || api.replay())
+            throw Error("Connection or profile changed.");
+          const result = (api.states().operations?.value.items ?? []).find((o) => o.requestId === id);
+          if (result && ["succeeded", "failed", "rejected", "cancelled", "unknown"].includes(result.status)) {
+            if (result.status !== "succeeded")
+              throw Error(result.error ?? "Equipment command did not complete.");
+            completed = true;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        if (!completed)
+          throw Error("Result pending. No further commands were sent.");
+      }
+    } catch (error) {
+      api.notice(error instanceof Error ? error.message : "Equipment operation stopped.");
+    } finally {
+      running = false;
+      api.busy(false);
+      update();
+    }
+  }
+  return update;
+}
+
+// web/replay-timeline.ts
+var DEFAULT_REPLAY_SPEED = 1;
+function recordingStart(recording) {
+  return Math.max(recording.start, recording.firstTelemetryAt || recording.start);
+}
+function fitWindow(start, end, bounds) {
+  const duration = Math.min(bounds.end - bounds.start, Math.max(1e4, end - start));
+  const left = Math.max(bounds.start, Math.min(start, bounds.end - duration));
+  return { start: left, end: left + duration };
+}
+function zoomWindow(view, factor, at, bounds) {
+  const width = Math.min(bounds.end - bounds.start, Math.max(1e4, (view.end - view.start) * factor));
+  return fitWindow(at - width / 2, at + width / 2, bounds);
+}
+function revealTime(view, at, bounds) {
+  return at >= view.start && at <= view.end ? view : zoomWindow(view, 1, at, bounds);
+}
+function selectionWindow(from, to, bounds) {
+  return fitWindow(Math.min(from, to), Math.max(from, to), bounds);
+}
+
 // web/replay.ts
 function mountReplay(hooks) {
-  let active = false, index, at = 0, playing = false, version = 0, abort, speed = 60, lastReal = 0;
+  let active = false, index, at = 0, playing = false, version = 0, abort, speed = DEFAULT_REPLAY_SPEED, lastReal = 0;
+  let view = { start: 0, end: 1 };
+  let playbackGeneration = 0;
   const clock = new Intl.DateTimeFormat(undefined, { timeZone: "America/Chicago", hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const date = new Intl.DateTimeFormat(undefined, { timeZone: "America/Chicago", dateStyle: "medium" });
   const button = document.createElement("button");
@@ -18,14 +233,32 @@ function mountReplay(hooks) {
   bar.id = "replay-timeline";
   bar.hidden = true;
   bar.setAttribute("aria-label", "Recording playback");
-  bar.innerHTML = '<div class="replay-heading"><strong>REPLAY</strong><span id="replay-night"></span><time id="replay-clock"></time><span id="replay-state" role="status"></span><button id="return-live">Return to Live ↗</button></div><div class="replay-controls"><button id="replay-play" aria-label="Play recording">▶</button><button id="replay-previous" aria-label="Previous event">│◀</button><button id="replay-next" aria-label="Next event">▶│</button><select id="replay-speed" aria-label="Playback speed"><option value="1">1×</option><option value="10">10×</option><option value="60" selected>60×</option><option value="300">300×</option></select><div class="replay-track"><div class="replay-marks" aria-hidden="true"></div><input id="replay-scrubber" aria-label="Recording time" type="range" step="1000"><div class="replay-scale"></div></div><select id="replay-events" aria-label="Jump to recorded event"><option value="">Events</option></select></div>';
+  bar.innerHTML = '<div class="replay-heading"><strong>REPLAY</strong><span id="replay-night"></span><time id="replay-clock"></time><span id="replay-state" role="status"></span><button id="return-live">Return to Live ↗</button></div><div class="replay-controls"><button id="replay-play" aria-label="Play recording">▶</button><button id="replay-previous" aria-label="Previous event">│◀</button><button id="replay-next" aria-label="Next event">▶│</button><select id="replay-speed" aria-label="Playback speed"><option value="1" selected>1×</option><option value="10">10×</option><option value="60">60×</option><option value="300">300×</option></select><button id="replay-zoom-out" aria-label="Zoom out timeline" title="Zoom out timeline">−</button><button id="replay-zoom-in" aria-label="Zoom in timeline" title="Zoom in timeline">+</button><button id="replay-full" title="Show full night">Full</button><button id="replay-follow" aria-pressed="true" title="Expand and center the recorded active step">◎ Follow</button><div class="replay-track"><div class="replay-marks" aria-hidden="true"></div><input id="replay-scrubber" aria-label="Recording time" type="range" step="1000"><div class="replay-scale"></div></div><select id="replay-events" aria-label="Jump to recorded event"><option value="">Events</option></select><div id="replay-overview" role="group" aria-label="Full-night overview; drag to select a time range" title="Drag across an area to zoom. Click to seek."><i class="overview-window"></i><i class="overview-playhead"></i></div></div>';
   document.body.append(bar);
   const find = (id) => bar.querySelector("#" + id);
   const slider = find("replay-scrubber"), status = find("replay-state"), play = find("replay-play");
   const label = (text) => {
     status.textContent = text;
   };
+  const bounds = () => ({ start: index ? recordingStart(index) : 0, end: index?.end ?? 1 });
+  function overview() {
+    if (!index)
+      return;
+    const span = Math.max(1, index.end - index.start), box = bar.querySelector(".overview-window"), head = bar.querySelector(".overview-playhead");
+    box.style.left = (view.start - index.start) / span * 100 + "%";
+    box.style.width = (view.end - view.start) / span * 100 + "%";
+    head.style.left = (at - index.start) / span * 100 + "%";
+  }
+  function showWindow(next) {
+    view = next;
+    slider.min = String(next.start);
+    slider.max = String(next.end);
+    track();
+    slider.value = String(at);
+    overview();
+  }
   function stop() {
+    ++playbackGeneration;
     playing = false;
     play.textContent = "▶";
     play.setAttribute("aria-label", "Play recording");
@@ -47,16 +280,19 @@ function mountReplay(hooks) {
     const ticket = ++version;
     abort?.abort();
     abort = new AbortController;
-    at = Math.max(index.start, Math.min(index.end, time));
+    at = Math.max(recordingStart(index), Math.min(index.end, time));
+    const nextView = revealTime(view, at, bounds());
+    if (nextView !== view)
+      showWindow(nextView);
     slider.value = String(at);
-    label("Loading recorded state…");
+    overview();
     try {
       const frame = await hooks.read("/api/v1/recordings/" + index.id + "/state?at=" + Math.round(at), abort.signal);
       if (ticket !== version || !active)
         return;
       hooks.frame(frame);
       find("replay-clock").textContent = clock.format(frame.at) + " Central";
-      label(frame.gap ? "No recorded telemetry · last update " + (frame.lastTelemetryAt ? clock.format(frame.lastTelemetryAt) : "unavailable") : "Recorded telemetry · controls disabled");
+      label(frame.gap ? "Recording gap · last update " + (frame.lastTelemetryAt ? clock.format(frame.lastTelemetryAt) : "unavailable") : "");
       status.classList.toggle("gap", frame.gap);
     } catch (error) {
       if (ticket === version && active) {
@@ -68,27 +304,28 @@ function mountReplay(hooks) {
   function track() {
     if (!index)
       return;
-    const duration = Math.max(1, index.end - index.start), marks = bar.querySelector(".replay-marks");
+    const duration = Math.max(1, view.end - view.start), marks = bar.querySelector(".replay-marks");
     marks.replaceChildren();
-    for (const gap of index.gaps) {
+    for (const gap of index.gaps.filter((g) => g.end >= view.start && g.start <= view.end)) {
+      const start = Math.max(view.start, gap.start), end = Math.min(view.end, gap.end);
       const span = document.createElement("i");
       span.className = "replay-gap";
-      span.style.left = (gap.start - index.start) / duration * 100 + "%";
-      span.style.width = (gap.end - gap.start) / duration * 100 + "%";
+      span.style.left = (start - view.start) / duration * 100 + "%";
+      span.style.width = (end - start) / duration * 100 + "%";
       marks.append(span);
     }
     const chosen = index.events.filter((e) => e.kind !== "step").concat(index.events.filter((e) => e.kind === "step")).slice(0, 180);
-    for (const event of chosen) {
+    for (const event of chosen.filter((e) => e.at >= view.start && e.at <= view.end)) {
       const mark = document.createElement("i");
       mark.className = "replay-mark kind-" + event.kind;
-      mark.style.left = (event.at - index.start) / duration * 100 + "%";
+      mark.style.left = (event.at - view.start) / duration * 100 + "%";
       marks.append(mark);
     }
     const scale = bar.querySelector(".replay-scale");
     scale.replaceChildren();
     for (let i = 0;i <= 4; i++) {
       const t = document.createElement("span");
-      t.textContent = clock.format(index.start + duration * i / 4);
+      t.textContent = clock.format(view.start + duration * i / 4);
       scale.append(t);
     }
     const events = find("replay-events");
@@ -108,6 +345,8 @@ function mountReplay(hooks) {
     find("replay-night").textContent = date.format(Date.parse(recording.startedAt));
     label("Indexing recording…");
     hooks.mode(true);
+    hooks.follow(true);
+    find("replay-follow").setAttribute("aria-pressed", "true");
     slider.disabled = true;
     play.disabled = true;
     try {
@@ -116,12 +355,11 @@ function mountReplay(hooks) {
         return;
       index = result;
       at = index.start;
-      slider.min = String(index.start);
-      slider.max = String(index.end);
       slider.disabled = false;
       play.disabled = false;
-      track();
-      await seek(index.firstTelemetryAt || at);
+      view = bounds();
+      showWindow(view);
+      await seek(recordingStart(index));
     } catch (e) {
       if (active && ticket === version)
         label(e instanceof Error ? e.message : "Could not open recording");
@@ -182,17 +420,73 @@ function mountReplay(hooks) {
     };
   find("replay-speed").onchange = (e) => {
     speed = Number(e.target.value);
+    lastReal = performance.now();
   };
-  async function tick() {
-    if (!playing || !active || !index)
+  find("replay-zoom-in").onclick = () => {
+    if (index)
+      showWindow(zoomWindow(view, 0.5, at, bounds()));
+  };
+  find("replay-zoom-out").onclick = () => {
+    if (index)
+      showWindow(zoomWindow(view, 2, at, bounds()));
+  };
+  find("replay-full").onclick = () => {
+    if (index)
+      showWindow(bounds());
+  };
+  find("replay-follow").onclick = () => {
+    const b = find("replay-follow"), enabled = b.getAttribute("aria-pressed") !== "true";
+    b.setAttribute("aria-pressed", String(enabled));
+    hooks.follow(enabled);
+  };
+  const overviewTrack = find("replay-overview");
+  let drag;
+  const overviewTime = (x) => {
+    const box = overviewTrack.getBoundingClientRect();
+    return index.start + Math.max(0, Math.min(1, (x - box.left) / box.width)) * (index.end - index.start);
+  };
+  overviewTrack.onpointerdown = (e) => {
+    if (!index)
+      return;
+    stop();
+    overviewTrack.setPointerCapture(e.pointerId);
+    drag = { x: e.clientX, at: overviewTime(e.clientX), start: view.start, end: view.end };
+  };
+  overviewTrack.onpointermove = (e) => {
+    if (!drag || !index)
+      return;
+    if (Math.abs(e.clientX - drag.x) > 5) {
+      view = selectionWindow(drag.at, overviewTime(e.clientX), bounds());
+      overview();
+    }
+  };
+  overviewTrack.onpointerup = (e) => {
+    if (!drag || !index)
+      return;
+    const selected = Math.abs(e.clientX - drag.x) > 5, start = selected ? view.start : overviewTime(e.clientX);
+    if (selected)
+      showWindow(view);
+    else
+      view = { start: drag.start, end: drag.end };
+    drag = undefined;
+    seek(start);
+  };
+  overviewTrack.onpointercancel = () => {
+    if (drag) {
+      showWindow({ start: drag.start, end: drag.end });
+      drag = undefined;
+    }
+  };
+  async function tick(run) {
+    if (!playing || !active || !index || run !== playbackGeneration)
       return;
     const now = performance.now(), next = at + (now - lastReal) * speed;
     lastReal = now;
     await seek(next);
     if (at >= index.end)
       stop();
-    if (playing)
-      setTimeout(() => void tick(), 250);
+    if (playing && run === playbackGeneration)
+      setTimeout(() => void tick(run), 250);
   }
   play.onclick = () => {
     if (playing) {
@@ -202,12 +496,12 @@ function mountReplay(hooks) {
     if (!index)
       return;
     if (at >= index.end)
-      at = index.start;
+      at = recordingStart(index);
     playing = true;
     lastReal = performance.now();
     play.textContent = "Ⅱ";
     play.setAttribute("aria-label", "Pause recording");
-    tick();
+    tick(++playbackGeneration);
   };
   return { active: () => active, at: () => at };
 }
@@ -256,7 +550,7 @@ function updateSequenceClocks(live, now = Date.now()) {
       span.textContent = text;
   }
 }
-function rolloverDeadline(details, observedAt, zone) {
+function rolloverDeadline(details, observedAt, zone, night) {
   const { hours, minutes, seconds, rolloverTime } = details;
   if (![hours, minutes, seconds].every((v) => typeof v === "number" && Number.isInteger(v)) || Number(hours) < 0 || Number(hours) > 23 || Number(minutes) < 0 || Number(minutes) > 59 || Number(seconds) < 0 || Number(seconds) > 59 || typeof rolloverTime !== "string")
     return NaN;
@@ -270,8 +564,9 @@ function rolloverDeadline(details, observedAt, zone) {
     const format = new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
     const parts = (time) => Object.fromEntries(format.formatToParts(time).map((p) => [p.type, p.value]));
     const now = parts(observed), clock = +now.hour * 3600 + +now.minute * 60 + +now.second;
-    const dayShift = clock < rollover && target >= rollover ? -1 : clock >= rollover && target < rollover ? 1 : 0;
-    const wall = Date.UTC(+now.year, +now.month - 1, +now.day + dayShift, Number(hours), Number(minutes), Number(seconds));
+    const nightParts = night && /^(\d{4})-(\d{2})-(\d{2})$/.exec(night);
+    const dayShift = nightParts ? target < rollover ? 1 : 0 : clock < rollover && target >= rollover ? -1 : clock >= rollover && target < rollover ? 1 : 0;
+    const wall = Date.UTC(nightParts ? +nightParts[1] : +now.year, (nightParts ? +nightParts[2] : +now.month) - 1, (nightParts ? +nightParts[3] : +now.day) + dayShift, Number(hours), Number(minutes), Number(seconds));
     let result = wall;
     for (let i = 0;i < 3; i++) {
       const p = parts(result);
@@ -289,6 +584,49 @@ function timedCountdownElement(details, observedAt, zone) {
     return;
   const deadline = rolloverDeadline(details, observedAt, zone);
   return countdownElement((deadline - Date.parse(observedAt)) / 1000, observedAt);
+}
+
+// web/sequence-actions-layout.ts
+function organizeSequenceActions(save, saveAs) {
+  const actions = document.querySelector(".sequence-actions");
+  if (!actions || actions.classList.contains("sequence-actions-organized"))
+    return;
+  const get = (id) => document.getElementById(id);
+  save.id = "sequence-save";
+  saveAs.id = "sequence-save-as";
+  saveAs.textContent = "Save as";
+  get("sequence-start").textContent = "▶ Start";
+  get("sequence-stop").textContent = "■ Stop";
+  get("sequence-reset").textContent = "↺ Reset";
+  function group(label, className, buttons) {
+    const row = document.createElement("div");
+    row.className = className;
+    row.setAttribute("role", "group");
+    row.setAttribute("aria-label", label + " actions");
+    const title = document.createElement("span");
+    title.className = "sequence-action-label";
+    title.textContent = label;
+    row.append(title, ...buttons);
+    return row;
+  }
+  const hint = get("sequence-action-hint");
+  actions.replaceChildren(group("File", "sequence-file-group", [get("sequence-load"), save, saveAs]), group("Run", "sequence-run-group", [get("sequence-start"), get("sequence-stop"), get("sequence-reset")]), group("View", "sequence-view-group", [get("sequence-fold-all")]), hint);
+  actions.classList.add("sequence-actions-organized");
+  const style = document.createElement("style");
+  style.id = "sequence-actions-layout-style";
+  style.textContent = `
+.sequence-panel .sequence-actions.sequence-actions-organized{display:flex;flex-direction:column;align-items:stretch;gap:8px}
+.sequence-actions-organized .sequence-file-group,.sequence-actions-organized .sequence-run-group{display:grid;grid-template-columns:36px repeat(3,minmax(0,1fr));align-items:center;gap:6px}
+.sequence-actions-organized .sequence-view-group{display:flex;align-items:center;gap:6px;padding-top:2px;border-top:1px solid var(--border)}
+.sequence-actions-organized .sequence-action-label{font-size:11px;color:var(--muted);font-weight:600;min-width:36px}
+.sequence-panel .sequence-actions.sequence-actions-organized button{min-height:32px;padding:6px 10px;font-size:12px;white-space:nowrap;min-width:0}
+.sequence-panel .sequence-actions.sequence-actions-organized :is(#sequence-start,#sequence-stop,#sequence-reset,#sequence-fold-all,#sequence-load,#sequence-save,#sequence-save-as){grid-column:auto;grid-row:auto;justify-self:stretch;margin:0}
+.sequence-panel .sequence-actions.sequence-actions-organized #sequence-fold-all{flex:0 0 auto;min-height:28px;font-size:11px;padding:4px 9px}
+.sequence-actions-organized #sequence-action-hint:empty{display:none}
+.replay-mode .sequence-panel .sequence-actions.sequence-actions-organized{display:none}
+@media(max-width:420px){.sequence-actions-organized .sequence-file-group,.sequence-actions-organized .sequence-run-group{grid-template-columns:30px repeat(3,minmax(0,1fr));gap:5px}.sequence-panel .sequence-actions.sequence-actions-organized button{padding:6px 4px}.sequence-actions-organized .sequence-action-label{min-width:30px}}
+`;
+  document.head.append(style);
 }
 
 // web/sequence-library.ts
@@ -339,6 +677,7 @@ function mountSequenceLibrary(api) {
   trigger.type = "button";
   trigger.textContent = "↥ Load";
   document.getElementById("sequence-start").before(trigger);
+  organizeSequenceActions(saveButton, saveAsButton);
   const style = document.createElement("style");
   style.textContent = `.sequence-actions{flex-wrap:wrap}@media(max-width:600px){.sequence-panel{min-width:0;width:100%;box-sizing:border-box}.sequence-header,.sequence-title{flex-wrap:wrap}.sequence-message{overflow-wrap:anywhere}}#sequence-load-dialog{width:min(540px,calc(100vw - 32px));box-sizing:border-box}#sequence-load-dialog header{display:flex;align-items:center;justify-content:space-between}#sequence-load-dialog h2{margin:0}#sequence-load-dialog input,#sequence-load-dialog select{width:100%;box-sizing:border-box;margin:10px 0}#sequence-load-dialog select{min-height:260px;padding:6px;background:#0c1c29;color:#dce8f2}#sequence-load-dialog option{padding:7px}#sequence-load-dialog footer{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}#sequence-load-dialog [role=status]{color:#9eafbd;font-size:12px}`;
   document.head.append(style);
@@ -779,7 +1118,7 @@ function sequenceDetail(n, target, cooling = {}) {
     return parts.join(" · ");
   }
   if (n.type === "WaitForTime" || n.type === "TimeCondition") {
-    const ref = clean(d.timeReference), h = d.hours, m = d.minutes, s = d.seconds, offset = d.minutesOffset;
+    const ref = clean(d.timeReference), { hours: h, minutes: m, seconds: s, minutesOffset: offset } = d;
     const clock = [h, m, s].every(numeric) ? [h, m, s].map((v) => String(v).padStart(2, "0")).join(":") : "";
     if (d.timeReferenceFixed === true || ref === "Time" || ref === "TimeProvider") {
       if (clock)
@@ -840,7 +1179,7 @@ function sequenceDetail(n, target, cooling = {}) {
     return parts.length ? parts.join(" · ") : "Cooling settings not reported";
   }
   if (n.type === "SwitchFilter") {
-    const f = n.editableFields?.find((f2) => f2.key === "Filter");
+    const f = n.editableFields?.find((f) => f.key === "Filter");
     return "Filter " + (clean(d.filter) || f?.choices?.find((c) => c.value === f.value)?.label || "not reported");
   }
   if (n.kind === "trigger" && get("AfterExposures") != null) {
@@ -1185,33 +1524,33 @@ function mountSequenceEditor(api) {
       p.textContent = "No supported parameters.";
       form.append(p);
     }
-    for (const field2 of item.editableFields ?? []) {
+    for (const field of item.editableFields ?? []) {
       const group = document.createElement("form");
       group.className = "parameter-row";
-      group.dataset.field = field2.key;
+      group.dataset.field = field.key;
       const label = document.createElement("label");
-      label.textContent = field2.label;
-      label.htmlFor = "parameter-" + field2.key;
+      label.textContent = field.label;
+      label.htmlFor = "parameter-" + field.key;
       const save = document.createElement("button");
       save.className = "parameter-apply";
       save.type = "submit";
       save.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>';
-      save.setAttribute("aria-label", "Apply " + field2.label);
-      save.title = "Apply " + field2.label;
+      save.setAttribute("aria-label", "Apply " + field.label);
+      save.title = "Apply " + field.label;
       const sync = () => {
-        const value = field2.type === "boolean" ? control.input.checked : field2.type === "string" ? control.input.value : Number(control.input.value);
-        save.dataset.clean = String(value === field2.value);
-        save.disabled = !!blocked() || stale() || value === field2.value;
-        group.classList.toggle("is-dirty", value !== field2.value);
+        const value = field.type === "boolean" ? control.input.checked : field.type === "string" ? control.input.value : Number(control.input.value);
+        save.dataset.clean = String(value === field.value);
+        save.disabled = !!blocked() || stale() || value === field.value;
+        group.classList.toggle("is-dirty", value !== field.value);
       };
-      const control = createParameterControl(field2, sync);
+      const control = createParameterControl(field, sync);
       group.onsubmit = (e) => {
         e.preventDefault();
         if (!guard() || !group.reportValidity())
           return;
-        const value = field2.type === "boolean" ? control.input.checked : field2.type === "string" ? control.input.value : Number(control.input.value);
-        expected = { nodeId: item.id, field: field2.key, value };
-        api.run("sequence", "editField", { ...parameters(), nodeId: item.id, field: field2.key, value });
+        const value = field.type === "boolean" ? control.input.checked : field.type === "string" ? control.input.value : Number(control.input.value);
+        expected = { nodeId: item.id, field: field.key, value };
+        api.run("sequence", "editField", { ...parameters(), nodeId: item.id, field: field.key, value });
       };
       group.append(label, control.host, save);
       form.append(group);
@@ -1424,9 +1763,9 @@ function mountSequenceEditor(api) {
     const target = e.target;
     const action = target.closest("[data-structure-action]");
     if (action) {
-      const id2 = action.closest(".sequence-node")?.dataset.nodeId;
-      if (id2 && action.dataset.structureAction !== "move")
-        structure(action.dataset.structureAction, id2);
+      const id = action.closest(".sequence-node")?.dataset.nodeId;
+      if (id && action.dataset.structureAction !== "move")
+        structure(action.dataset.structureAction, id);
       return;
     }
     const label = target.closest(".sequence-step-menu")?.closest(".sequence-node")?.querySelector("strong") ?? target.closest(".sequence-node strong");
@@ -1641,7 +1980,7 @@ function mountView(s, live, mini = false, camera = defaultMountCamera) {
     }));
     function face(vertices, shade) {
       const pts = vertices.map(project);
-      faces.push({ points: pts.map((p) => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(" "), depth: pts.reduce((n, p) => n + p.depth, 0) / pts.length, color: `rgb(${rgb.map((c2) => Math.round(c2 * shade)).join(",")})` });
+      faces.push({ points: pts.map((p) => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(" "), depth: pts.reduce((n, p) => n + p.depth, 0) / pts.length, color: `rgb(${rgb.map((c) => Math.round(c * shade)).join(",")})` });
     }
     for (let i = 0;i < 16; i++)
       face([rings[0][i], rings[0][(i + 1) % 16], rings[1][(i + 1) % 16], rings[1][i]], 0.65 + 0.3 * (1 + Math.cos(i * Math.PI / 8)) / 2);
@@ -1672,7 +2011,7 @@ function mountView(s, live, mini = false, camera = defaultMountCamera) {
     const ps = line.map(([x, y, z]) => project({ x, y, z }));
     return `<line x1="${ps[0].x}" y1="${ps[0].y}" x2="${ps[1].x}" y2="${ps[1].y}"/>`;
   }).join("");
-  return `<div class="mount-model${known ? "" : " is-offline"}${s.slewing === true && known ? " is-slewing" : ""}" data-pointing="${known ? `${s.altitude},${s.azimuth}` : ""}" data-view="${camera.azimuth.toFixed(1)},${camera.elevation.toFixed(1)}"><svg viewBox="0 0 300 270" role="img" aria-label="Telescope pointing · ${status}"><polygon points="${ground.map((p) => `${p.x},${p.y}`).join(" ")}" fill="#0c1d2b" stroke="#365669"/><g stroke="#2b495b">${axes}</g><g fill="#91aebd" font-size="11">${labels}</g>${faces.sort((a, b) => a.depth - b.depth).map((f) => `<polygon points="${f.points}" fill="${f.color}" stroke="${f.color}" stroke-width=".3"/>`).join("")}</svg><span class="mount-motion${s.slewing && known ? " moving" : ""}">${status}</span></div>`;
+  return `<div class="mount-model${known ? "" : " is-offline"}${s.slewing === true && known ? " is-slewing" : ""}" data-pointing="${known ? `${s.altitude},${s.azimuth}` : ""}" data-view="${camera.azimuth.toFixed(1)},${camera.elevation.toFixed(1)}"><svg viewBox="0 0 300 270" role="img" aria-label="Telescope pointing · ${status}"><polygon points="${ground.map((p) => `${p.x},${p.y}`).join(" ")}" fill="#0c1d2b" stroke="#365669"/><g stroke="#2b495b">${axes}</g><g fill="var(--muted)" font-size="11">${labels}</g>${faces.sort((a, b) => a.depth - b.depth).map((f) => `<polygon points="${f.points}" fill="${f.color}" stroke="${f.color}" stroke-width=".3"/>`).join("")}</svg><span class="mount-motion${s.slewing && known ? " moving" : ""}">${status}</span></div>`;
 }
 
 // web/node_modules/three/build/three.core.js
@@ -7845,17 +8184,17 @@ class BufferGeometry extends EventDispatcher {
     }
   }
   toNonIndexed() {
-    function convertBufferAttribute(attribute, indices2) {
+    function convertBufferAttribute(attribute, indices) {
       const array = attribute.array;
       const itemSize = attribute.itemSize;
       const normalized = attribute.normalized;
-      const array2 = new array.constructor(indices2.length * itemSize);
+      const array2 = new array.constructor(indices.length * itemSize);
       let index = 0, index2 = 0;
-      for (let i = 0, l = indices2.length;i < l; i++) {
+      for (let i = 0, l = indices.length;i < l; i++) {
         if (attribute.isInterleavedBufferAttribute) {
-          index = indices2[i] * attribute.data.stride + attribute.offset;
+          index = indices[i] * attribute.data.stride + attribute.offset;
         } else {
-          index = indices2[i] * itemSize;
+          index = indices[i] * itemSize;
         }
         for (let j = 0;j < itemSize; j++) {
           array2[index2++] = array[index++];
@@ -8727,9 +9066,9 @@ class Material extends EventDispatcher {
     function extractFromCache(cache) {
       const values = [];
       for (const key in cache) {
-        const data2 = cache[key];
-        delete data2.metadata;
-        values.push(data2);
+        const data = cache[key];
+        delete data.metadata;
+        values.push(data);
       }
       return values;
     }
@@ -10060,12 +10399,12 @@ class BoxGeometry extends BufferGeometry {
     this.setAttribute("position", new Float32BufferAttribute(vertices, 3));
     this.setAttribute("normal", new Float32BufferAttribute(normals, 3));
     this.setAttribute("uv", new Float32BufferAttribute(uvs, 2));
-    function buildPlane(u, v, w, udir, vdir, width2, height2, depth2, gridX, gridY, materialIndex) {
-      const segmentWidth = width2 / gridX;
-      const segmentHeight = height2 / gridY;
-      const widthHalf = width2 / 2;
-      const heightHalf = height2 / 2;
-      const depthHalf = depth2 / 2;
+    function buildPlane(u, v, w, udir, vdir, width, height, depth, gridX, gridY, materialIndex) {
+      const segmentWidth = width / gridX;
+      const segmentHeight = height / gridY;
+      const widthHalf = width / 2;
+      const heightHalf = height / 2;
+      const depthHalf = depth / 2;
       const gridX1 = gridX + 1;
       const gridY1 = gridY + 1;
       let vertexCounter = 0;
@@ -10081,7 +10420,7 @@ class BoxGeometry extends BufferGeometry {
           vertices.push(vector.x, vector.y, vector.z);
           vector[u] = 0;
           vector[v] = 0;
-          vector[w] = depth2 > 0 ? 1 : -1;
+          vector[w] = depth > 0 ? 1 : -1;
           normals.push(vector.x, vector.y, vector.z);
           uvs.push(ix / gridX);
           uvs.push(1 - iy / gridY);
@@ -10896,13 +11235,13 @@ function cubicBezierSlope(s, p0, p1, p2, p3) {
 function solveBezierParameter(x, x0, x1, x2, x3) {
   let s = (x - x0) / (x3 - x0);
   for (let i = 0;i < 8; i++) {
-    const error2 = cubicBezier(s, x0, x1, x2, x3) - x;
-    if (Math.abs(error2) < 0.0000000001)
+    const error = cubicBezier(s, x0, x1, x2, x3) - x;
+    if (Math.abs(error) < 0.0000000001)
       break;
     const slope = cubicBezierSlope(s, x0, x1, x2, x3);
     if (Math.abs(slope) < 0.0000000001)
       break;
-    s = Math.max(0, Math.min(1, s - error2 / slope));
+    s = Math.max(0, Math.min(1, s - error / slope));
   }
   return s;
 }
@@ -17212,7 +17551,7 @@ function WebGLBackground(renderer, environments, state, objects, alpha, premulti
         }));
         boxMesh.geometry.deleteAttribute("normal");
         boxMesh.geometry.deleteAttribute("uv");
-        boxMesh.onBeforeRender = function(renderer2, scene2, camera) {
+        boxMesh.onBeforeRender = function(renderer, scene, camera) {
           this.matrixWorld.copyPosition(camera.matrixWorld);
         };
         Object.defineProperty(boxMesh.material, "envMap", {
@@ -17276,9 +17615,9 @@ function WebGLBackground(renderer, environments, state, objects, alpha, premulti
       renderList.unshift(planeMesh, planeMesh.geometry, planeMesh.material, 0, 0, null);
     }
   }
-  function setClear(color, alpha2) {
+  function setClear(color, alpha) {
     color.getRGB(_rgb, getUnlitUniformColorSpace(renderer));
-    state.buffers.color.setClear(_rgb.r, _rgb.g, _rgb.b, alpha2, premultipliedAlpha);
+    state.buffers.color.setClear(_rgb.r, _rgb.g, _rgb.b, alpha, premultipliedAlpha);
   }
   function dispose() {
     if (boxMesh !== undefined) {
@@ -17296,16 +17635,16 @@ function WebGLBackground(renderer, environments, state, objects, alpha, premulti
     getClearColor: function() {
       return clearColor;
     },
-    setClearColor: function(color, alpha2 = 1) {
+    setClearColor: function(color, alpha = 1) {
       clearColor.set(color);
-      clearAlpha = alpha2;
+      clearAlpha = alpha;
       setClear(clearColor, clearAlpha);
     },
     getClearAlpha: function() {
       return clearAlpha;
     },
-    setClearAlpha: function(alpha2) {
-      clearAlpha = alpha2;
+    setClearAlpha: function(alpha) {
+      clearAlpha = alpha;
       setClear(clearColor, clearAlpha);
     },
     render,
@@ -17428,13 +17767,13 @@ function WebGLBindingStates(gl, attributes) {
   }
   function saveCache(object, geometry, program, index) {
     const cache = {};
-    const attributes2 = geometry.attributes;
+    const attributes = geometry.attributes;
     let attributesNum = 0;
     const programAttributes = program.getAttributes();
     for (const name in programAttributes) {
       const programAttribute = programAttributes[name];
       if (programAttribute.location >= 0) {
-        let attribute = attributes2[name];
+        let attribute = attributes[name];
         if (attribute === undefined) {
           if (name === "instanceMatrix" && object.instanceMatrix)
             attribute = object.instanceMatrix;
@@ -17734,14 +18073,14 @@ function WebGLCapabilities(gl, extensions, parameters, utils) {
     }
     return true;
   }
-  function getMaxPrecision(precision2) {
-    if (precision2 === "highp") {
+  function getMaxPrecision(precision) {
+    if (precision === "highp") {
       if (gl.getShaderPrecisionFormat(gl.VERTEX_SHADER, gl.HIGH_FLOAT).precision > 0 && gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT).precision > 0) {
         return "highp";
       }
-      precision2 = "mediump";
+      precision = "mediump";
     }
-    if (precision2 === "mediump") {
+    if (precision === "mediump") {
       if (gl.getShaderPrecisionFormat(gl.VERTEX_SHADER, gl.MEDIUM_FLOAT).precision > 0 && gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.MEDIUM_FLOAT).precision > 0) {
         return "mediump";
       }
@@ -17767,7 +18106,7 @@ function WebGLCapabilities(gl, extensions, parameters, utils) {
   const maxVertexUniforms = gl.getParameter(gl.MAX_VERTEX_UNIFORM_VECTORS);
   const maxVaryings = gl.getParameter(gl.MAX_VARYING_VECTORS);
   const maxFragmentUniforms = gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS);
-  const maxSamples2 = gl.getParameter(gl.MAX_SAMPLES);
+  const maxSamples = gl.getParameter(gl.MAX_SAMPLES);
   const samples = gl.getParameter(gl.SAMPLES);
   return {
     isWebGL2: true,
@@ -17786,7 +18125,7 @@ function WebGLCapabilities(gl, extensions, parameters, utils) {
     maxVertexUniforms,
     maxVaryings,
     maxFragmentUniforms,
-    maxSamples: maxSamples2,
+    maxSamples,
     samples
   };
 }
@@ -18013,9 +18352,9 @@ class PMREMGenerator {
     this._renderer.compile(mesh, _flatCamera);
   }
   _sceneToCubeUV(scene, near, far, cubeUVRenderTarget, position) {
-    const fov2 = 90;
-    const aspect2 = 1;
-    const cubeCamera = new PerspectiveCamera(fov2, aspect2, near, far);
+    const fov = 90;
+    const aspect = 1;
+    const cubeCamera = new PerspectiveCamera(fov, aspect, near, far);
     const upSign = [1, -1, 1, 1, 1, 1];
     const forwardSign = [1, 1, 1, -1, -1, -1];
     const renderer = this._renderer;
@@ -19184,31 +19523,31 @@ function WebGLOutput(type, width, height, antialias, depth, stencil) {
   let _savedRenderTarget = null;
   let _effects = [];
   let _hasRenderPass = false;
-  this.setSize = function(width2, height2) {
-    targetScene.setSize(width2, height2);
+  this.setSize = function(width, height) {
+    targetScene.setSize(width, height);
     if (targetA !== null)
-      targetA.setSize(width2, height2);
+      targetA.setSize(width, height);
     if (targetB !== null)
-      targetB.setSize(width2, height2);
+      targetB.setSize(width, height);
     for (let i = 0;i < _effects.length; i++) {
       const effect = _effects[i];
       if (effect.setSize)
-        effect.setSize(width2, height2);
+        effect.setSize(width, height);
     }
   };
   this.setEffects = function(effects) {
     _effects = effects;
     _hasRenderPass = _effects.length > 0 && _effects[0].isRenderPass === true;
-    const width2 = targetScene.width;
-    const height2 = targetScene.height;
+    const width = targetScene.width;
+    const height = targetScene.height;
     if (_effects.length > 0 && targetA === null) {
-      targetA = new WebGLRenderTarget(width2, height2, { type: HalfFloatType, depthBuffer: false, stencilBuffer: false });
-      targetB = new WebGLRenderTarget(width2, height2, { type: HalfFloatType, depthBuffer: false, stencilBuffer: false });
+      targetA = new WebGLRenderTarget(width, height, { type: HalfFloatType, depthBuffer: false, stencilBuffer: false });
+      targetB = new WebGLRenderTarget(width, height, { type: HalfFloatType, depthBuffer: false, stencilBuffer: false });
     }
     for (let i = 0;i < _effects.length; i++) {
       const effect = _effects[i];
       if (effect.setSize)
-        effect.setSize(width2, height2);
+        effect.setSize(width, height);
     }
   };
   this.begin = function(renderer, renderTarget) {
@@ -19218,10 +19557,10 @@ function WebGLOutput(type, width, height, antialias, depth, stencil) {
       return false;
     _savedRenderTarget = renderTarget;
     if (renderTarget !== null) {
-      const width2 = renderTarget.width;
-      const height2 = renderTarget.height;
-      if (targetScene.width !== width2 || targetScene.height !== height2) {
-        this.setSize(width2, height2);
+      const width = renderTarget.width;
+      const height = renderTarget.height;
+      if (targetScene.width !== width || targetScene.height !== height) {
+        this.setSize(width, height);
       }
     }
     if (_hasRenderPass === false) {
@@ -19555,10 +19894,10 @@ function setValueV4ui(gl, v) {
 }
 function setValueT1(gl, v, textures) {
   const cache = this.cache;
-  const unit2 = textures.allocateTextureUnit();
-  if (cache[0] !== unit2) {
-    gl.uniform1i(this.addr, unit2);
-    cache[0] = unit2;
+  const unit = textures.allocateTextureUnit();
+  if (cache[0] !== unit) {
+    gl.uniform1i(this.addr, unit);
+    cache[0] = unit;
   }
   let emptyTexture2D;
   if (this.type === gl.SAMPLER_2D_SHADOW) {
@@ -19567,34 +19906,34 @@ function setValueT1(gl, v, textures) {
   } else {
     emptyTexture2D = emptyTexture;
   }
-  textures.setTexture2D(v || emptyTexture2D, unit2);
+  textures.setTexture2D(v || emptyTexture2D, unit);
 }
 function setValueT3D1(gl, v, textures) {
   const cache = this.cache;
-  const unit2 = textures.allocateTextureUnit();
-  if (cache[0] !== unit2) {
-    gl.uniform1i(this.addr, unit2);
-    cache[0] = unit2;
+  const unit = textures.allocateTextureUnit();
+  if (cache[0] !== unit) {
+    gl.uniform1i(this.addr, unit);
+    cache[0] = unit;
   }
-  textures.setTexture3D(v || empty3dTexture, unit2);
+  textures.setTexture3D(v || empty3dTexture, unit);
 }
 function setValueT6(gl, v, textures) {
   const cache = this.cache;
-  const unit2 = textures.allocateTextureUnit();
-  if (cache[0] !== unit2) {
-    gl.uniform1i(this.addr, unit2);
-    cache[0] = unit2;
+  const unit = textures.allocateTextureUnit();
+  if (cache[0] !== unit) {
+    gl.uniform1i(this.addr, unit);
+    cache[0] = unit;
   }
-  textures.setTextureCube(v || emptyCubeTexture, unit2);
+  textures.setTextureCube(v || emptyCubeTexture, unit);
 }
 function setValueT2DArray1(gl, v, textures) {
   const cache = this.cache;
-  const unit2 = textures.allocateTextureUnit();
-  if (cache[0] !== unit2) {
-    gl.uniform1i(this.addr, unit2);
-    cache[0] = unit2;
+  const unit = textures.allocateTextureUnit();
+  if (cache[0] !== unit) {
+    gl.uniform1i(this.addr, unit);
+    cache[0] = unit;
   }
-  textures.setTexture2DArray(v || emptyArrayTexture, unit2);
+  textures.setTexture2DArray(v || emptyArrayTexture, unit);
 }
 function getSingularSetter(type) {
   switch (type) {
@@ -21994,23 +22333,23 @@ function WebGLShadowMap(renderer, objects, capabilities) {
       for (let face = 0;face < faceCount; face++) {
         const shadowCamera = shadow.getCamera(face);
         if (light.isPointLight) {
-          const camera2 = shadow.camera;
+          const camera = shadow.camera;
           const shadowMatrix = shadow.matrix;
-          const far = light.distance || camera2.far;
-          if (far !== camera2.far) {
-            camera2.far = far;
-            camera2.updateProjectionMatrix();
+          const far = light.distance || camera.far;
+          if (far !== camera.far) {
+            camera.far = far;
+            camera.updateProjectionMatrix();
           }
           _lightPositionWorld2.setFromMatrixPosition(light.matrixWorld);
-          camera2.position.copy(_lightPositionWorld2);
-          _lookTarget2.copy(camera2.position);
+          camera.position.copy(_lightPositionWorld2);
+          _lookTarget2.copy(camera.position);
           _lookTarget2.add(_cubeDirections[face]);
-          camera2.up.copy(_cubeUps[face]);
-          camera2.lookAt(_lookTarget2);
-          camera2.updateMatrixWorld();
+          camera.up.copy(_cubeUps[face]);
+          camera.lookAt(_lookTarget2);
+          camera.updateMatrixWorld();
           shadowMatrix.makeTranslation(-_lightPositionWorld2.x, -_lightPositionWorld2.y, -_lightPositionWorld2.z);
-          _projScreenMatrix2.multiplyMatrices(camera2.projectionMatrix, camera2.matrixWorldInverse);
-          shadow._frustum.setFromProjectionMatrix(_projScreenMatrix2, camera2.coordinateSystem, camera2.reversedDepth);
+          _projScreenMatrix2.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+          shadow._frustum.setFromProjectionMatrix(_projScreenMatrix2, camera.coordinateSystem, camera.reversedDepth);
         }
         if (shadow.map.isWebGLCubeRenderTarget) {
           renderer.setRenderTarget(shadow.map, face);
@@ -22452,30 +22791,30 @@ function WebGLState(gl, extensions) {
     return false;
   }
   function drawBuffers(renderTarget, framebuffer) {
-    let drawBuffers2 = defaultDrawbuffers;
+    let drawBuffers = defaultDrawbuffers;
     let needsUpdate = false;
     if (renderTarget) {
-      drawBuffers2 = currentDrawbuffers.get(framebuffer);
-      if (drawBuffers2 === undefined) {
-        drawBuffers2 = [];
-        currentDrawbuffers.set(framebuffer, drawBuffers2);
+      drawBuffers = currentDrawbuffers.get(framebuffer);
+      if (drawBuffers === undefined) {
+        drawBuffers = [];
+        currentDrawbuffers.set(framebuffer, drawBuffers);
       }
       const textures = renderTarget.textures;
-      if (drawBuffers2.length !== textures.length || drawBuffers2[0] !== gl.COLOR_ATTACHMENT0) {
+      if (drawBuffers.length !== textures.length || drawBuffers[0] !== gl.COLOR_ATTACHMENT0) {
         for (let i = 0, il = textures.length;i < il; i++) {
-          drawBuffers2[i] = gl.COLOR_ATTACHMENT0 + i;
+          drawBuffers[i] = gl.COLOR_ATTACHMENT0 + i;
         }
-        drawBuffers2.length = textures.length;
+        drawBuffers.length = textures.length;
         needsUpdate = true;
       }
     } else {
-      if (drawBuffers2[0] !== gl.BACK) {
-        drawBuffers2[0] = gl.BACK;
+      if (drawBuffers[0] !== gl.BACK) {
+        drawBuffers[0] = gl.BACK;
         needsUpdate = true;
       }
     }
     if (needsUpdate) {
-      gl.drawBuffers(drawBuffers2);
+      gl.drawBuffers(drawBuffers);
     }
   }
   function useProgram(program) {
@@ -22799,16 +23138,16 @@ function WebGLState(gl, extensions) {
       parameters[name] = value;
     }
   }
-  function scissor(scissor2) {
-    if (currentScissor.equals(scissor2) === false) {
-      gl.scissor(scissor2.x, scissor2.y, scissor2.z, scissor2.w);
-      currentScissor.copy(scissor2);
+  function scissor(scissor) {
+    if (currentScissor.equals(scissor) === false) {
+      gl.scissor(scissor.x, scissor.y, scissor.z, scissor.w);
+      currentScissor.copy(scissor);
     }
   }
-  function viewport(viewport2) {
-    if (currentViewport.equals(viewport2) === false) {
-      gl.viewport(viewport2.x, viewport2.y, viewport2.z, viewport2.w);
-      currentViewport.copy(viewport2);
+  function viewport(viewport) {
+    if (currentViewport.equals(viewport) === false) {
+      gl.viewport(viewport.x, viewport.y, viewport.z, viewport.w);
+      currentViewport.copy(viewport);
     }
   }
   function updateUBOMapping(uniformsGroup, program) {
@@ -22953,7 +23292,7 @@ function WebGLTextures(_gl, extensions, state, properties, capabilities, utils, 
   const _imageDimensions = new Vector2;
   const _videoTextures = new WeakMap;
   const _htmlTextures = new Set;
-  let _canvas2;
+  let _canvas;
   const _sources = new WeakMap;
   let useOffscreenCanvas = false;
   try {
@@ -22972,9 +23311,9 @@ function WebGLTextures(_gl, extensions, state, properties, capabilities, utils, 
       if (typeof HTMLImageElement !== "undefined" && image instanceof HTMLImageElement || typeof HTMLCanvasElement !== "undefined" && image instanceof HTMLCanvasElement || typeof ImageBitmap !== "undefined" && image instanceof ImageBitmap || typeof VideoFrame !== "undefined" && image instanceof VideoFrame) {
         const width = Math.floor(scale * dimensions.width);
         const height = Math.floor(scale * dimensions.height);
-        if (_canvas2 === undefined)
-          _canvas2 = createCanvas(width, height);
-        const canvas = needsNewCanvas ? createCanvas(width, height) : _canvas2;
+        if (_canvas === undefined)
+          _canvas = createCanvas(width, height);
+        const canvas = needsNewCanvas ? createCanvas(width, height) : _canvas;
         canvas.width = width;
         canvas.height = height;
         const context = canvas.getContext("2d");
@@ -23644,7 +23983,7 @@ function WebGLTextures(_gl, extensions, state, properties, capabilities, utils, 
           if (useTexStorage) {
             state.texStorage2D(_gl.TEXTURE_2D, levels, glInternalFormat, image.width, image.height);
           } else {
-            let { width, height } = image;
+            let width = image.width, height = image.height;
             for (let i = 0;i < levels; i++) {
               state.texImage2D(_gl.TEXTURE_2D, i, glInternalFormat, width, height, 0, glFormat, glType, null);
               width >>= 1;
@@ -24088,12 +24427,12 @@ function WebGLTextures(_gl, extensions, state, properties, capabilities, utils, 
         renderTargetProperties.__webglColorRenderbuffer = [];
         state.bindFramebuffer(_gl.FRAMEBUFFER, renderTargetProperties.__webglMultisampledFramebuffer);
         for (let i = 0;i < textures.length; i++) {
-          const texture2 = textures[i];
+          const texture = textures[i];
           renderTargetProperties.__webglColorRenderbuffer[i] = _gl.createRenderbuffer();
           _gl.bindRenderbuffer(_gl.RENDERBUFFER, renderTargetProperties.__webglColorRenderbuffer[i]);
-          const glFormat = utils.convert(texture2.format, texture2.colorSpace);
-          const glType = utils.convert(texture2.type);
-          const glInternalFormat = getInternalFormat(texture2.internalFormat, glFormat, glType, texture2.normalized, texture2.colorSpace, renderTarget.isXRRenderTarget === true);
+          const glFormat = utils.convert(texture.format, texture.colorSpace);
+          const glType = utils.convert(texture.type);
+          const glInternalFormat = getInternalFormat(texture.internalFormat, glFormat, glType, texture.normalized, texture.colorSpace, renderTarget.isXRRenderTarget === true);
           const samples = getRenderTargetSamples(renderTarget);
           _gl.renderbufferStorageMultisample(_gl.RENDERBUFFER, samples, glInternalFormat, renderTarget.width, renderTarget.height);
           _gl.framebufferRenderbuffer(_gl.FRAMEBUFFER, _gl.COLOR_ATTACHMENT0 + i, _gl.RENDERBUFFER, renderTargetProperties.__webglColorRenderbuffer[i]);
@@ -24811,14 +25150,14 @@ class WebXRManager extends EventDispatcher {
         const inputSource = event.added[i];
         let controllerIndex = controllerInputSources.indexOf(inputSource);
         if (controllerIndex === -1) {
-          for (let i2 = 0;i2 < controllers.length; i2++) {
-            if (i2 >= controllerInputSources.length) {
+          for (let i = 0;i < controllers.length; i++) {
+            if (i >= controllerInputSources.length) {
               controllerInputSources.push(inputSource);
-              controllerIndex = i2;
+              controllerIndex = i;
               break;
-            } else if (controllerInputSources[i2] === null) {
-              controllerInputSources[i2] = inputSource;
-              controllerIndex = i2;
+            } else if (controllerInputSources[i] === null) {
+              controllerInputSources[i] = inputSource;
+              controllerIndex = i;
               break;
             }
           }
@@ -24833,12 +25172,12 @@ class WebXRManager extends EventDispatcher {
     }
     const cameraLPos = new Vector3;
     const cameraRPos = new Vector3;
-    function setProjectionFromUnion(camera, cameraL2, cameraR2) {
-      cameraLPos.setFromMatrixPosition(cameraL2.matrixWorld);
-      cameraRPos.setFromMatrixPosition(cameraR2.matrixWorld);
+    function setProjectionFromUnion(camera, cameraL, cameraR) {
+      cameraLPos.setFromMatrixPosition(cameraL.matrixWorld);
+      cameraRPos.setFromMatrixPosition(cameraR.matrixWorld);
       const ipd = cameraLPos.distanceTo(cameraRPos);
-      const projL = cameraL2.projectionMatrix.elements;
-      const projR = cameraR2.projectionMatrix.elements;
+      const projL = cameraL.projectionMatrix.elements;
+      const projR = cameraR.projectionMatrix.elements;
       const near = projL[14] / (projL[10] - 1);
       const far = projL[14] / (projL[10] + 1);
       const topFov = (projL[9] + 1) / projL[5];
@@ -24849,14 +25188,14 @@ class WebXRManager extends EventDispatcher {
       const right = near * rightFov;
       const zOffset = ipd / (-leftFov + rightFov);
       const xOffset = zOffset * -leftFov;
-      cameraL2.matrixWorld.decompose(camera.position, camera.quaternion, camera.scale);
+      cameraL.matrixWorld.decompose(camera.position, camera.quaternion, camera.scale);
       camera.translateX(xOffset);
       camera.translateZ(zOffset);
       camera.matrixWorld.compose(camera.position, camera.quaternion, camera.scale);
       camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
       if (projL[10] === -1) {
-        camera.projectionMatrix.copy(cameraL2.projectionMatrix);
-        camera.projectionMatrixInverse.copy(cameraL2.projectionMatrixInverse);
+        camera.projectionMatrix.copy(cameraL.projectionMatrix);
+        camera.projectionMatrixInverse.copy(cameraL.projectionMatrixInverse);
       } else {
         const near2 = near + zOffset;
         const far2 = far + zOffset;
@@ -24901,12 +25240,12 @@ class WebXRManager extends EventDispatcher {
       cameraL.layers.mask = cameraXR.layers.mask & -5;
       cameraR.layers.mask = cameraXR.layers.mask & -3;
       const parent = camera.parent;
-      const cameras2 = cameraXR.cameras;
+      const cameras = cameraXR.cameras;
       updateCamera(cameraXR, parent);
-      for (let i = 0;i < cameras2.length; i++) {
-        updateCamera(cameras2[i], parent);
+      for (let i = 0;i < cameras.length; i++) {
+        updateCamera(cameras[i], parent);
       }
-      if (cameras2.length === 2) {
+      if (cameras.length === 2) {
         setProjectionFromUnion(cameraXR, cameraL, cameraR);
       } else {
         cameraXR.projectionMatrix.copy(cameraL.projectionMatrix);
@@ -24916,18 +25255,18 @@ class WebXRManager extends EventDispatcher {
       }
       updateUserCamera(camera, cameraXR, parent);
     };
-    function updateUserCamera(camera, cameraXR2, parent) {
+    function updateUserCamera(camera, cameraXR, parent) {
       if (parent === null) {
-        camera.matrix.copy(cameraXR2.matrixWorld);
+        camera.matrix.copy(cameraXR.matrixWorld);
       } else {
         camera.matrix.copy(parent.matrixWorld);
         camera.matrix.invert();
-        camera.matrix.multiply(cameraXR2.matrixWorld);
+        camera.matrix.multiply(cameraXR.matrixWorld);
       }
       camera.matrix.decompose(camera.position, camera.quaternion, camera.scale);
       camera.updateMatrixWorld(true);
-      camera.projectionMatrix.copy(cameraXR2.projectionMatrix);
-      camera.projectionMatrixInverse.copy(cameraXR2.projectionMatrixInverse);
+      camera.projectionMatrix.copy(cameraXR.projectionMatrix);
+      camera.projectionMatrixInverse.copy(cameraXR.projectionMatrixInverse);
       if (camera.isPerspectiveCamera) {
         camera.fov = RAD2DEG * 2 * Math.atan(1 / camera.projectionMatrix.elements[5]);
         camera.zoom = 1;
@@ -25446,10 +25785,10 @@ function WebGLUniformsGroups(gl, info, capabilities, state) {
         let arrayOffset = 0;
         for (let k = 0;k < value.length; k++) {
           const val = value[k];
-          const info2 = getUniformSize(val);
+          const info = getUniformSize(val);
           writeUniformValue(val, uniform.__data, arrayOffset);
           if (typeof val !== "number" && typeof val !== "boolean" && !val.isMatrix3 && !ArrayBuffer.isView(val)) {
-            arrayOffset += info2.storage / Float32Array.BYTES_PER_ELEMENT;
+            arrayOffset += info.storage / Float32Array.BYTES_PER_ELEMENT;
           }
         }
       } else {
@@ -25521,17 +25860,17 @@ function WebGLUniformsGroups(gl, info, capabilities, state) {
         const values = Array.isArray(uniform.value) ? uniform.value : [uniform.value];
         for (let k = 0, kl = values.length;k < kl; k++) {
           const value = values[k];
-          const info2 = getUniformSize(value);
-          const chunkOffset2 = offset % chunkSize;
-          const chunkPadding = chunkOffset2 % info2.boundary;
-          const chunkStart = chunkOffset2 + chunkPadding;
+          const info = getUniformSize(value);
+          const chunkOffset = offset % chunkSize;
+          const chunkPadding = chunkOffset % info.boundary;
+          const chunkStart = chunkOffset + chunkPadding;
           offset += chunkPadding;
-          if (chunkStart !== 0 && chunkSize - chunkStart < info2.storage) {
+          if (chunkStart !== 0 && chunkSize - chunkStart < info.storage) {
             offset += chunkSize - chunkStart;
           }
-          uniform.__data = new Float32Array(info2.storage / Float32Array.BYTES_PER_ELEMENT);
+          uniform.__data = new Float32Array(info.storage / Float32Array.BYTES_PER_ELEMENT);
           uniform.__offset = offset;
-          offset += info2.storage;
+          offset += info.storage;
         }
       }
     }
@@ -25543,37 +25882,37 @@ function WebGLUniformsGroups(gl, info, capabilities, state) {
     return this;
   }
   function getUniformSize(value) {
-    const info2 = {
+    const info = {
       boundary: 0,
       storage: 0
     };
     if (typeof value === "number" || typeof value === "boolean") {
-      info2.boundary = 4;
-      info2.storage = 4;
+      info.boundary = 4;
+      info.storage = 4;
     } else if (value.isVector2) {
-      info2.boundary = 8;
-      info2.storage = 8;
+      info.boundary = 8;
+      info.storage = 8;
     } else if (value.isVector3 || value.isColor) {
-      info2.boundary = 16;
-      info2.storage = 12;
+      info.boundary = 16;
+      info.storage = 12;
     } else if (value.isVector4) {
-      info2.boundary = 16;
-      info2.storage = 16;
+      info.boundary = 16;
+      info.storage = 16;
     } else if (value.isMatrix3) {
-      info2.boundary = 48;
-      info2.storage = 48;
+      info.boundary = 48;
+      info.storage = 48;
     } else if (value.isMatrix4) {
-      info2.boundary = 64;
-      info2.storage = 64;
+      info.boundary = 64;
+      info.storage = 64;
     } else if (value.isTexture) {
       warn("WebGLRenderer: Texture samplers can not be part of an uniforms group.");
     } else if (ArrayBuffer.isView(value)) {
-      info2.boundary = 16;
-      info2.storage = value.byteLength;
+      info.boundary = 16;
+      info.storage = value.byteLength;
     } else {
       warn("WebGLRenderer: Unsupported uniform value type.", value);
     }
-    return info2;
+    return info;
   }
   function onUniformsGroupsDispose(event) {
     const uniformsGroup = event.target;
@@ -26221,7 +26560,7 @@ class WebGLRenderer {
     const _frustum = new Frustum;
     let _clippingEnabled = false;
     let _localClippingEnabled = false;
-    const _projScreenMatrix3 = new Matrix4;
+    const _projScreenMatrix = new Matrix4;
     const _vector3 = new Vector3;
     const _vector4 = new Vector4;
     const _emptyScene = { background: null, fog: null, environment: null, overrideMaterial: null, isScene: true };
@@ -26439,7 +26778,7 @@ class WebGLRenderer {
     this.setClearAlpha = function() {
       background.setClearAlpha(...arguments);
     };
-    this.clear = function(color = true, depth2 = true, stencil2 = true) {
+    this.clear = function(color = true, depth = true, stencil = true) {
       let bits = 0;
       if (color) {
         let isIntegerFormat = false;
@@ -26472,11 +26811,11 @@ class WebGLRenderer {
           bits |= _gl.COLOR_BUFFER_BIT;
         }
       }
-      if (depth2) {
+      if (depth) {
         bits |= _gl.DEPTH_BUFFER_BIT;
         this.state.buffers.depth.setMask(true);
       }
-      if (stencil2) {
+      if (stencil) {
         bits |= _gl.STENCIL_BUFFER_BIT;
         this.state.buffers.stencil.setMask(4294967295);
       }
@@ -26626,10 +26965,10 @@ class WebGLRenderer {
         if (!extensions.get("WEBGL_multi_draw")) {
           const starts = object._multiDrawStarts;
           const counts = object._multiDrawCounts;
-          const drawCount2 = object._multiDrawCount;
+          const drawCount = object._multiDrawCount;
           const bytesPerElement = index ? attributes.get(index).bytesPerElement : 1;
           const uniforms = properties.get(material).currentProgram.getUniforms();
-          for (let i = 0;i < drawCount2; i++) {
+          for (let i = 0;i < drawCount; i++) {
             uniforms.setValue(_gl, "_gl_DrawID", i);
             renderer.render(starts[i] / bytesPerElement, counts[i]);
           }
@@ -26698,7 +27037,7 @@ class WebGLRenderer {
         clipping.setGlobalState(this.clippingPlanes, camera);
       if (_nodesHandler !== null)
         shadowMap.render(currentRenderState.state.shadowsArray, targetScene, camera);
-      const materials2 = new Set;
+      const materials = new Set;
       scene.traverse(function(object) {
         if (!(object.isMesh || object.isPoints || object.isLine || object.isSprite)) {
           return;
@@ -26709,31 +27048,31 @@ class WebGLRenderer {
             for (let i = 0;i < material.length; i++) {
               const material2 = material[i];
               prepareMaterial(material2, targetScene, camera, object);
-              materials2.add(material2);
+              materials.add(material2);
             }
           } else {
             prepareMaterial(material, targetScene, camera, object);
-            materials2.add(material);
+            materials.add(material);
           }
         }
       });
       currentRenderState = renderStateStack.pop();
       if (_nodesHandler !== null)
         _nodesHandler.renderEnd();
-      return materials2;
+      return materials;
     };
     this.compileAsync = function(scene, camera, targetScene = null) {
-      const materials2 = this.compile(scene, camera, targetScene);
+      const materials = this.compile(scene, camera, targetScene);
       return new Promise((resolve) => {
         function checkMaterialsReady() {
-          materials2.forEach(function(material) {
+          materials.forEach(function(material) {
             const materialProperties = properties.get(material);
             const program = materialProperties.currentProgram;
             if (program === undefined || program.isReady()) {
-              materials2.delete(material);
+              materials.delete(material);
             }
           });
-          if (materials2.size === 0) {
+          if (materials.size === 0) {
             resolve(scene);
             return;
           }
@@ -26795,8 +27134,8 @@ class WebGLRenderer {
       currentRenderState.init(camera);
       currentRenderState.state.textureUnits = textures.getTextureUnits();
       renderStateStack.push(currentRenderState);
-      _projScreenMatrix3.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-      _frustum.setFromProjectionMatrix(_projScreenMatrix3, WebGLCoordinateSystem, camera.reversedDepth);
+      _projScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      _frustum.setFromProjectionMatrix(_projScreenMatrix, WebGLCoordinateSystem, camera.reversedDepth);
       _localClippingEnabled = this.localClippingEnabled;
       _clippingEnabled = clipping.init(this.clippingPlanes, _localClippingEnabled);
       currentRenderList = renderLists.get(scene, renderListStack.length);
@@ -26906,7 +27245,7 @@ class WebGLRenderer {
         } else if (object.isSprite) {
           if (!object.frustumCulled || object.intersectsFrustum(_frustum)) {
             if (sortObjects) {
-              _vector4.setFromMatrixPosition(object.matrixWorld).applyMatrix4(_projScreenMatrix3);
+              _vector4.setFromMatrixPosition(object.matrixWorld).applyMatrix4(_projScreenMatrix);
             }
             const geometry = objects.update(object);
             const material = object.material;
@@ -26928,7 +27267,7 @@ class WebGLRenderer {
                   geometry.computeBoundingSphere();
                 _vector4.copy(geometry.boundingSphere.center);
               }
-              _vector4.applyMatrix4(object.matrixWorld).applyMatrix4(_projScreenMatrix3);
+              _vector4.applyMatrix4(object.matrixWorld).applyMatrix4(_projScreenMatrix);
             }
             if (Array.isArray(material)) {
               const groups = geometry.groups;
@@ -26950,8 +27289,8 @@ class WebGLRenderer {
         projectObject(children[i], camera, groupOrder, sortObjects);
       }
     }
-    function renderScene(currentRenderList2, scene, camera, viewport) {
-      const { opaque: opaqueObjects, transmissive: transmissiveObjects, transparent: transparentObjects } = currentRenderList2;
+    function renderScene(currentRenderList, scene, camera, viewport) {
+      const { opaque: opaqueObjects, transmissive: transmissiveObjects, transparent: transparentObjects } = currentRenderList;
       currentRenderState.setupLightsView(camera);
       if (_clippingEnabled === true)
         clipping.setGlobalState(_this.clippingPlanes, camera);
@@ -27080,8 +27419,8 @@ class WebGLRenderer {
       const lights = currentRenderState.state.lights;
       const shadowsArray = currentRenderState.state.shadowsArray;
       const lightsStateVersion = lights.state.version;
-      const parameters2 = programCache.getParameters(material, lights.state, shadowsArray, scene, object, currentRenderState.state.lightProbeGridArray);
-      const programCacheKey = programCache.getProgramCacheKey(parameters2);
+      const parameters = programCache.getParameters(material, lights.state, shadowsArray, scene, object, currentRenderState.state.lightProbeGridArray);
+      const programCacheKey = programCache.getProgramCacheKey(parameters);
       let programs = materialProperties.programs;
       materialProperties.environment = material.isMeshStandardMaterial || material.isMeshLambertMaterial || material.isMeshPhongMaterial ? scene.environment : null;
       materialProperties.fog = scene.fog;
@@ -27096,24 +27435,24 @@ class WebGLRenderer {
       let program = programs.get(programCacheKey);
       if (program !== undefined) {
         if (materialProperties.currentProgram === program && materialProperties.lightsStateVersion === lightsStateVersion) {
-          updateCommonMaterialProperties(material, parameters2);
+          updateCommonMaterialProperties(material, parameters);
           return program;
         }
       } else {
-        parameters2.uniforms = programCache.getUniforms(material);
+        parameters.uniforms = programCache.getUniforms(material);
         if (_nodesHandler !== null && material.isNodeMaterial) {
-          _nodesHandler.build(material, object, parameters2);
+          _nodesHandler.build(material, object, parameters);
         }
-        material.onBeforeCompile(parameters2, _this);
-        program = programCache.acquireProgram(parameters2, programCacheKey);
+        material.onBeforeCompile(parameters, _this);
+        program = programCache.acquireProgram(parameters, programCacheKey);
         programs.set(programCacheKey, program);
-        materialProperties.uniforms = parameters2.uniforms;
+        materialProperties.uniforms = parameters.uniforms;
       }
       const uniforms = materialProperties.uniforms;
       if (!material.isShaderMaterial && !material.isRawShaderMaterial || material.clipping === true) {
         uniforms.clippingPlanes = clipping.uniform;
       }
-      updateCommonMaterialProperties(material, parameters2);
+      updateCommonMaterialProperties(material, parameters);
       materialProperties.needsLights = materialNeedsLights(material);
       materialProperties.lightsStateVersion = lightsStateVersion;
       if (materialProperties.needsLights) {
@@ -27150,24 +27489,24 @@ class WebGLRenderer {
       }
       return materialProperties.uniformsList;
     }
-    function updateCommonMaterialProperties(material, parameters2) {
+    function updateCommonMaterialProperties(material, parameters) {
       const materialProperties = properties.get(material);
-      materialProperties.outputColorSpace = parameters2.outputColorSpace;
-      materialProperties.batching = parameters2.batching;
-      materialProperties.batchingColor = parameters2.batchingColor;
-      materialProperties.instancing = parameters2.instancing;
-      materialProperties.instancingColor = parameters2.instancingColor;
-      materialProperties.instancingMorph = parameters2.instancingMorph;
-      materialProperties.skinning = parameters2.skinning;
-      materialProperties.morphTargets = parameters2.morphTargets;
-      materialProperties.morphNormals = parameters2.morphNormals;
-      materialProperties.morphColors = parameters2.morphColors;
-      materialProperties.morphTargetsCount = parameters2.morphTargetsCount;
-      materialProperties.numClippingPlanes = parameters2.numClippingPlanes;
-      materialProperties.numIntersection = parameters2.numClipIntersection;
-      materialProperties.vertexAlphas = parameters2.vertexAlphas;
-      materialProperties.vertexTangents = parameters2.vertexTangents;
-      materialProperties.toneMapping = parameters2.toneMapping;
+      materialProperties.outputColorSpace = parameters.outputColorSpace;
+      materialProperties.batching = parameters.batching;
+      materialProperties.batchingColor = parameters.batchingColor;
+      materialProperties.instancing = parameters.instancing;
+      materialProperties.instancingColor = parameters.instancingColor;
+      materialProperties.instancingMorph = parameters.instancingMorph;
+      materialProperties.skinning = parameters.skinning;
+      materialProperties.morphTargets = parameters.morphTargets;
+      materialProperties.morphNormals = parameters.morphNormals;
+      materialProperties.morphColors = parameters.morphColors;
+      materialProperties.morphTargetsCount = parameters.morphTargetsCount;
+      materialProperties.numClippingPlanes = parameters.numClippingPlanes;
+      materialProperties.numIntersection = parameters.numClipIntersection;
+      materialProperties.vertexAlphas = parameters.vertexAlphas;
+      materialProperties.vertexTangents = parameters.vertexTangents;
+      materialProperties.toneMapping = parameters.toneMapping;
     }
     function findLightProbeGrid(volumes, object) {
       if (volumes.length === 0)
@@ -27298,8 +27637,8 @@ class WebGLRenderer {
         }
       }
       if (refreshProgram || _currentCamera !== camera) {
-        const reversedDepthBuffer2 = state.buffers.depth.getReversed();
-        if (reversedDepthBuffer2 && camera.reversedDepth !== true) {
+        const reversedDepthBuffer = state.buffers.depth.getReversed();
+        if (reversedDepthBuffer && camera.reversedDepth !== true) {
           camera._reversedDepth = true;
           camera.updateProjectionMatrix();
         }
@@ -27574,8 +27913,8 @@ class WebGLRenderer {
             _gl.readPixels(x, y, width, height, utils.convert(textureFormat), utils.convert(textureType), buffer);
           }
         } finally {
-          const framebuffer2 = _currentRenderTarget !== null ? properties.get(_currentRenderTarget).__webglFramebuffer : null;
-          state.bindFramebuffer(_gl.FRAMEBUFFER, framebuffer2);
+          const framebuffer = _currentRenderTarget !== null ? properties.get(_currentRenderTarget).__webglFramebuffer : null;
+          state.bindFramebuffer(_gl.FRAMEBUFFER, framebuffer);
         }
       }
     };
@@ -27634,13 +27973,13 @@ class WebGLRenderer {
       state.unbindTexture();
     };
     this.copyTextureToTexture = function(srcTexture, dstTexture, srcRegion = null, dstPosition = null, srcLevel = 0, dstLevel = 0) {
-      let width, height, depth2, minX, minY, minZ;
+      let width, height, depth, minX, minY, minZ;
       let dstX, dstY, dstZ;
       const image = srcTexture.isCompressedTexture ? srcTexture.mipmaps[dstLevel] : srcTexture.image;
       if (srcRegion !== null) {
         width = srcRegion.max.x - srcRegion.min.x;
         height = srcRegion.max.y - srcRegion.min.y;
-        depth2 = srcRegion.isBox3 ? srcRegion.max.z - srcRegion.min.z : 1;
+        depth = srcRegion.isBox3 ? srcRegion.max.z - srcRegion.min.z : 1;
         minX = srcRegion.min.x;
         minY = srcRegion.min.y;
         minZ = srcRegion.isBox3 ? srcRegion.min.z : 0;
@@ -27649,11 +27988,11 @@ class WebGLRenderer {
         width = Math.floor(image.width * levelScale);
         height = Math.floor(image.height * levelScale);
         if (srcTexture.isDataArrayTexture) {
-          depth2 = image.depth;
+          depth = image.depth;
         } else if (srcTexture.isData3DTexture) {
-          depth2 = Math.floor(image.depth * levelScale);
+          depth = Math.floor(image.depth * levelScale);
         } else {
-          depth2 = 1;
+          depth = 1;
         }
         minX = 0;
         minY = 0;
@@ -27704,7 +28043,7 @@ class WebGLRenderer {
         const dstRenderTargetProperties = properties.get(dstTextureProperties.__renderTarget);
         state.bindFramebuffer(_gl.READ_FRAMEBUFFER, srcRenderTargetProperties.__webglFramebuffer);
         state.bindFramebuffer(_gl.DRAW_FRAMEBUFFER, dstRenderTargetProperties.__webglFramebuffer);
-        for (let i = 0;i < depth2; i++) {
+        for (let i = 0;i < depth; i++) {
           if (isSrc3D) {
             _gl.framebufferTextureLayer(_gl.READ_FRAMEBUFFER, _gl.COLOR_ATTACHMENT0, properties.get(srcTexture).__webglTexture, srcLevel, minZ + i);
             _gl.framebufferTextureLayer(_gl.DRAW_FRAMEBUFFER, _gl.COLOR_ATTACHMENT0, properties.get(dstTexture).__webglTexture, dstLevel, dstZ + i);
@@ -27718,7 +28057,7 @@ class WebGLRenderer {
         const dstTextureProperties = properties.get(dstTexture);
         state.bindFramebuffer(_gl.READ_FRAMEBUFFER, _srcFramebuffer);
         state.bindFramebuffer(_gl.DRAW_FRAMEBUFFER, _dstFramebuffer);
-        for (let i = 0;i < depth2; i++) {
+        for (let i = 0;i < depth; i++) {
           if (isSrc3D) {
             _gl.framebufferTextureLayer(_gl.READ_FRAMEBUFFER, _gl.COLOR_ATTACHMENT0, srcTextureProperties.__webglTexture, srcLevel, minZ + i);
           } else {
@@ -27742,11 +28081,11 @@ class WebGLRenderer {
       } else {
         if (isDst3D) {
           if (srcTexture.isDataTexture || srcTexture.isData3DTexture) {
-            _gl.texSubImage3D(glTarget, dstLevel, dstX, dstY, dstZ, width, height, depth2, glFormat, glType, image.data);
+            _gl.texSubImage3D(glTarget, dstLevel, dstX, dstY, dstZ, width, height, depth, glFormat, glType, image.data);
           } else if (dstTexture.isCompressedArrayTexture) {
-            _gl.compressedTexSubImage3D(glTarget, dstLevel, dstX, dstY, dstZ, width, height, depth2, glFormat, image.data);
+            _gl.compressedTexSubImage3D(glTarget, dstLevel, dstX, dstY, dstZ, width, height, depth, glFormat, image.data);
           } else {
-            _gl.texSubImage3D(glTarget, dstLevel, dstX, dstY, dstZ, width, height, depth2, glFormat, glType, image);
+            _gl.texSubImage3D(glTarget, dstLevel, dstX, dstY, dstZ, width, height, depth, glFormat, glType, image);
           }
         } else {
           if (srcTexture.isDataTexture) {
@@ -27811,7 +28150,7 @@ class WebGLRenderer {
 }
 
 // web/mount-camera.ts
-function fitMountCamera(camera, bounds, aspect2) {
+function fitMountCamera(camera, bounds, aspect) {
   camera.up.set(0, 1, 0);
   camera.updateMatrixWorld(true);
   let extent = 0.1;
@@ -27819,14 +28158,45 @@ function fitMountCamera(camera, bounds, aspect2) {
     for (const y of [bounds.min.y, bounds.max.y])
       for (const z of [bounds.min.z, bounds.max.z]) {
         const p = new Vector3(x, y, z).applyMatrix4(camera.matrixWorldInverse);
-        extent = Math.max(extent, Math.abs(p.y), Math.abs(p.x) / Math.max(0.1, aspect2));
+        extent = Math.max(extent, Math.abs(p.y), Math.abs(p.x) / Math.max(0.1, aspect));
       }
   extent *= 1.08;
-  camera.left = -extent * aspect2;
-  camera.right = extent * aspect2;
+  camera.left = -extent * aspect;
+  camera.right = extent * aspect;
   camera.top = extent;
   camera.bottom = -extent;
   camera.updateProjectionMatrix();
+}
+
+// web/mount-motion.ts
+class MountMotion {
+  current = new Quaternion;
+  target = new Quaternion;
+  lastTime = 0;
+  initialized = false;
+  moving = false;
+  setTarget(target, time, immediate = false) {
+    this.target.copy(target);
+    if (!this.initialized || immediate) {
+      this.current.copy(target);
+      this.moving = false;
+    } else
+      this.moving = this.current.angleTo(this.target) > 0;
+    this.initialized = true;
+    this.lastTime = time;
+  }
+  advance(time, immediate = false) {
+    if (!this.moving)
+      return false;
+    const elapsed = Math.max(0, time - this.lastTime);
+    this.lastTime = time;
+    this.current.slerp(this.target, immediate ? 1 : 1 - Math.exp(-elapsed / 180));
+    if (this.current.angleTo(this.target) < 0.0001) {
+      this.current.copy(this.target);
+      this.moving = false;
+    }
+    return this.moving;
+  }
 }
 // web/assets/starfront-rig.json
 var starfront_rig_default = {
@@ -27907,8 +28277,13 @@ class MountRenderer {
   scene = new Scene;
   camera = new OrthographicCamera(-1.7, 1.7, 1.6, -1.6, 0.1, 30);
   optics = new Group;
+  motion = new MountMotion;
+  pointingKnown = false;
+  reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
   materials = [];
   textures = [];
+  compassLabels = [];
+  theme = window.matchMedia("(prefers-color-scheme: light)");
   localGeometry = [];
   resize;
   frame = 0;
@@ -27998,6 +28373,7 @@ class MountRenderer {
       const texture = new CanvasTexture(c);
       texture.colorSpace = SRGBColorSpace;
       this.textures.push(texture);
+      this.compassLabels.push({ canvas: c, texture, label: name });
       const material = new SpriteMaterial({ map: texture, transparent: true, depthWrite: false });
       this.materials.push(material);
       const sprite = new Sprite(material);
@@ -28005,12 +28381,28 @@ class MountRenderer {
       sprite.scale.set(0.17, 0.17, 0.17);
       compass.add(sprite);
     }
+    this.theme.addEventListener("change", this.themeChanged);
+    this.themeChanged();
     this.resize = new ResizeObserver(() => this.request());
     this.resize.observe(host);
     document.addEventListener("visibilitychange", this.visible);
     this.renderer.domElement.addEventListener("webglcontextlost", this.contextLost);
     this.renderer.domElement.addEventListener("webglcontextrestored", this.contextRestored);
   }
+  themeChanged = () => {
+    const color = getComputedStyle(this.host).getPropertyValue("--muted").trim() || "#9bbac9";
+    for (const { canvas, texture, label } of this.compassLabels) {
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, 64, 64);
+      ctx.font = "500 42px system-ui";
+      ctx.fillStyle = color;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, 32, 32);
+      texture.needsUpdate = true;
+    }
+    this.request();
+  };
   visible = () => {
     if (!document.hidden)
       this.request();
@@ -28030,7 +28422,12 @@ class MountRenderer {
       return;
     this.signature = signature;
     const alt = (valid ? s.altitude : 45) * Math.PI / 180, az = (valid ? s.azimuth : 0) * Math.PI / 180;
-    this.optics.quaternion.setFromUnitVectors(new Vector3(0, 0, -1), new Vector3(Math.sin(az) * Math.cos(alt), Math.sin(alt), -Math.cos(az) * Math.cos(alt)));
+    const pointing = valid ? `${s.altitude},${s.azimuth}` : "";
+    if (pointing !== this.model.dataset.pointing || valid !== this.pointingKnown || !valid) {
+      const target = new Quaternion().setFromUnitVectors(new Vector3(0, 0, -1), new Vector3(Math.sin(az) * Math.cos(alt), Math.sin(alt), -Math.cos(az) * Math.cos(alt)));
+      this.motion.setTarget(target, performance.now(), !valid || !this.pointingKnown || this.reducedMotion.matches);
+    }
+    this.pointingKnown = valid;
     this.currentCamera = { ...camera };
     this.model.classList.toggle("is-offline", !valid);
     this.model.dataset.pointing = valid ? `${s.altitude},${s.azimuth}` : "";
@@ -28050,11 +28447,13 @@ class MountRenderer {
   draw() {
     if (!this.alive || !this.host.isConnected || !this.host.getBoundingClientRect().width || document.hidden)
       return;
+    const moving = this.motion.advance(performance.now(), this.reducedMotion.matches);
+    this.optics.quaternion.copy(this.motion.current);
     const width = this.host.clientWidth, height = this.mini ? Math.max(16, this.host.clientHeight - 12) : 330;
     this.renderer.setSize(width, height, false);
-    const aspect2 = width / height, halfHeight = 1.52;
-    this.camera.left = -halfHeight * aspect2;
-    this.camera.right = halfHeight * aspect2;
+    const aspect = width / height, halfHeight = 1.52;
+    this.camera.left = -halfHeight * aspect;
+    this.camera.right = halfHeight * aspect;
     this.camera.top = halfHeight;
     this.camera.bottom = -halfHeight;
     this.camera.updateProjectionMatrix();
@@ -28068,8 +28467,11 @@ class MountRenderer {
     this.host.dataset.renderFrames = String(++this.frames);
     this.host.dataset.renderGeometries = String(this.renderer.info.memory.geometries);
     this.host.dataset.renderTextures = String(this.renderer.info.memory.textures);
+    if (moving)
+      this.request();
   }
   dispose() {
+    this.theme.removeEventListener("change", this.themeChanged);
     this.alive = false;
     cancelAnimationFrame(this.frame);
     this.resize.disconnect();
@@ -28149,28 +28551,28 @@ function Frac(x) {
   return x - Math.floor(x);
 }
 var Body;
-(function(Body2) {
-  Body2["Sun"] = "Sun";
-  Body2["Moon"] = "Moon";
-  Body2["Mercury"] = "Mercury";
-  Body2["Venus"] = "Venus";
-  Body2["Earth"] = "Earth";
-  Body2["Mars"] = "Mars";
-  Body2["Jupiter"] = "Jupiter";
-  Body2["Saturn"] = "Saturn";
-  Body2["Uranus"] = "Uranus";
-  Body2["Neptune"] = "Neptune";
-  Body2["Pluto"] = "Pluto";
-  Body2["SSB"] = "SSB";
-  Body2["EMB"] = "EMB";
-  Body2["Star1"] = "Star1";
-  Body2["Star2"] = "Star2";
-  Body2["Star3"] = "Star3";
-  Body2["Star4"] = "Star4";
-  Body2["Star5"] = "Star5";
-  Body2["Star6"] = "Star6";
-  Body2["Star7"] = "Star7";
-  Body2["Star8"] = "Star8";
+(function(Body) {
+  Body["Sun"] = "Sun";
+  Body["Moon"] = "Moon";
+  Body["Mercury"] = "Mercury";
+  Body["Venus"] = "Venus";
+  Body["Earth"] = "Earth";
+  Body["Mars"] = "Mars";
+  Body["Jupiter"] = "Jupiter";
+  Body["Saturn"] = "Saturn";
+  Body["Uranus"] = "Uranus";
+  Body["Neptune"] = "Neptune";
+  Body["Pluto"] = "Pluto";
+  Body["SSB"] = "SSB";
+  Body["EMB"] = "EMB";
+  Body["Star1"] = "Star1";
+  Body["Star2"] = "Star2";
+  Body["Star3"] = "Star3";
+  Body["Star4"] = "Star4";
+  Body["Star5"] = "Star5";
+  Body["Star6"] = "Star6";
+  Body["Star7"] = "Star7";
+  Body["Star8"] = "Star8";
 })(Body || (Body = {}));
 var StarList = [
   Body.Star1,
@@ -28218,9 +28620,9 @@ function DefineStar(body, ra, dec, distanceLightYears) {
   star.dist = distanceLightYears * AU_PER_LY;
 }
 var PrecessDirection;
-(function(PrecessDirection2) {
-  PrecessDirection2[PrecessDirection2["From2000"] = 0] = "From2000";
-  PrecessDirection2[PrecessDirection2["Into2000"] = 1] = "Into2000";
+(function(PrecessDirection) {
+  PrecessDirection[PrecessDirection["From2000"] = 0] = "From2000";
+  PrecessDirection[PrecessDirection["Into2000"] = 1] = "Into2000";
 })(PrecessDirection || (PrecessDirection = {}));
 var vsop = {
   Mercury: [
@@ -29194,10 +29596,10 @@ function CalcMoon(time) {
   }
   function Term(p, q, r, s) {
     var result = { x: 1, y: 0 };
-    var I2 = [0, p, q, r, s];
+    var I = [0, p, q, r, s];
     for (var k = 1;k <= 4; ++k)
-      if (I2[k] !== 0)
-        AddThe(result.x, result.y, CO(I2[k], k), SI(I2[k], k), (c, s2) => (result.x = c, result.y = s2));
+      if (I[k] !== 0)
+        AddThe(result.x, result.y, CO(I[k], k), SI(I[k], k), (c, s) => (result.x = c, result.y = s));
     return result;
   }
   function AddSol(coeffl, coeffs, coeffg, coeffp, p, q, r, s) {
@@ -30093,10 +30495,10 @@ function HelioVector(body, date) {
     return new Vector(e.x + m.x, e.y + m.y, e.z + m.z, time);
   }
   if (body === Body.EMB) {
-    const e2 = CalcVsop(vsop.Earth, time);
-    const m2 = GeoMoon(time);
+    const e = CalcVsop(vsop.Earth, time);
+    const m = GeoMoon(time);
     const denom = 1 + EARTH_MOON_MASS_RATIO;
-    return new Vector(e2.x + m2.x / denom, e2.y + m2.y / denom, e2.z + m2.z / denom, time);
+    return new Vector(e.x + m.x / denom, e.y + m.y / denom, e.z + m.z / denom, time);
   }
   if (body === Body.SSB)
     return CalcSolarSystemBarycenter(time);
@@ -30134,7 +30536,7 @@ class BodyPosition {
   Position(time) {
     if (this.aberration) {
       this.observerPos = HelioVector(this.observerBody, time);
-    } else {}
+    }
     const targetPos = HelioVector(this.targetBody, time);
     return new Vector(targetPos.x - this.observerPos.x, targetPos.y - this.observerPos.y, targetPos.z - this.observerPos.z, time);
   }
@@ -30562,9 +30964,9 @@ function SearchHourAngle(body, observer, hourAngle, dateStart, direction = 1) {
   }
 }
 var ApsisKind;
-(function(ApsisKind2) {
-  ApsisKind2[ApsisKind2["Pericenter"] = 0] = "Pericenter";
-  ApsisKind2[ApsisKind2["Apocenter"] = 1] = "Apocenter";
+(function(ApsisKind) {
+  ApsisKind[ApsisKind["Pericenter"] = 0] = "Pericenter";
+  ApsisKind[ApsisKind["Apocenter"] = 1] = "Apocenter";
 })(ApsisKind || (ApsisKind = {}));
 function InverseRotation(rotation) {
   return new RotationMatrix([
@@ -30705,17 +31107,17 @@ function Rotation_HOR_EQJ(time, observer) {
   return CombineRotation(hor_eqd, eqd_eqj);
 }
 var EclipseKind;
-(function(EclipseKind2) {
-  EclipseKind2["Penumbral"] = "penumbral";
-  EclipseKind2["Partial"] = "partial";
-  EclipseKind2["Annular"] = "annular";
-  EclipseKind2["Total"] = "total";
+(function(EclipseKind) {
+  EclipseKind["Penumbral"] = "penumbral";
+  EclipseKind["Partial"] = "partial";
+  EclipseKind["Annular"] = "annular";
+  EclipseKind["Total"] = "total";
 })(EclipseKind || (EclipseKind = {}));
 var NodeEventKind;
-(function(NodeEventKind2) {
-  NodeEventKind2[NodeEventKind2["Invalid"] = 0] = "Invalid";
-  NodeEventKind2[NodeEventKind2["Ascending"] = 1] = "Ascending";
-  NodeEventKind2[NodeEventKind2["Descending"] = -1] = "Descending";
+(function(NodeEventKind) {
+  NodeEventKind[NodeEventKind["Invalid"] = 0] = "Invalid";
+  NodeEventKind[NodeEventKind["Ascending"] = 1] = "Ascending";
+  NodeEventKind[NodeEventKind["Descending"] = -1] = "Descending";
 })(NodeEventKind || (NodeEventKind = {}));
 
 // web/mount-pointing.ts
@@ -30732,6 +31134,250 @@ function horizontalTarget(site, azimuth, altitude, when = new Date) {
   const horizon = VectorFromHorizon(new Spherical2(altitude, azimuth, 1), when, "normal");
   const eq = EquatorFromVector(RotateVector(Rotation_HOR_EQJ(when, observer), horizon));
   return { ra: eq.ra, dec: eq.dec };
+}
+
+// web/sequence-imaging-progress.ts
+var imagingExposureCount = (value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+function sequenceImagingProgress(nodes, truncated = false) {
+  const index = new Map(nodes.map((n) => [n.id, n]));
+  const children = new Map;
+  for (const n of nodes)
+    if (n.parentId) {
+      const siblings = children.get(n.parentId) ?? [];
+      siblings.push(n);
+      children.set(n.parentId, siblings);
+    }
+  let captured = 0, planned = 0, exposures = 0;
+  let countKnown = true, planKnown = !truncated, timed = false;
+  for (const n of nodes) {
+    if (!["TakeExposure", "TakeSubframeExposure"].includes(n.type))
+      continue;
+    const ancestry = [n];
+    const visited = new Set([n.id]);
+    let next = n.parentId, missing = false;
+    while (next) {
+      const parent = index.get(next);
+      if (!parent || visited.has(next)) {
+        missing = true;
+        break;
+      }
+      visited.add(next);
+      ancestry.push(parent);
+      next = parent.parentId;
+    }
+    if (ancestry.some((a) => a.kind === "trigger" || a.state === "disabled"))
+      continue;
+    exposures++;
+    if (missing)
+      planKnown = false;
+    const taken = imagingExposureCount(n.details.exposureCount);
+    if (taken === null)
+      countKnown = false;
+    else
+      captured += taken;
+    let repetitions = 1;
+    for (const ancestor of ancestry.slice(1)) {
+      let loopLimit = null;
+      for (const condition of children.get(ancestor.id) ?? []) {
+        if (condition.kind !== "condition" || condition.state === "disabled")
+          continue;
+        if (condition.type === "LoopCondition") {
+          const iterations = imagingExposureCount(condition.details.iterations);
+          if (iterations === null)
+            planKnown = false;
+          else
+            loopLimit = Math.min(loopLimit ?? iterations, iterations);
+        } else {
+          planKnown = false;
+          if (condition.type === "TimeCondition")
+            timed = true;
+        }
+      }
+      repetitions *= loopLimit ?? 1;
+    }
+    if (!Number.isSafeInteger(repetitions) || !Number.isSafeInteger(planned + repetitions))
+      planKnown = false;
+    else
+      planned += repetitions;
+  }
+  if (nodes.some((n) => ["SmartExposure", "TakeManyExposures"].includes(n.type)) && !exposures) {
+    planKnown = false;
+    countKnown = false;
+  }
+  const actual = countKnown ? captured : null;
+  const total = planKnown && exposures > 0 ? planned : null;
+  const percent = actual !== null && total !== null && total > 0 ? Math.round(Math.min(1, actual / total) * 100) : null;
+  const qualifiers = [
+    timed ? "time-limited plan" : total === null && exposures ? "planned count unavailable" : "",
+    truncated ? "shown portion" : ""
+  ].filter(Boolean);
+  const summary = !exposures && !truncated && countKnown ? "No imaging instructions" : actual === null ? "Image count unavailable" : total === null ? `${actual.toLocaleString()} images taken` : `${actual.toLocaleString()} / ${total.toLocaleString()} images taken`;
+  return { captured: actual, planned: total, percent, label: [summary, ...qualifiers].join(" · ") };
+}
+
+// web/sequence-night-timeline.ts
+function nightTimeline(nodes, observedAt, zone) {
+  const root = nodes.find((n) => n.type === "SequenceRootContainer");
+  const night = root?.name.match(/^\d{4}-\d{2}-\d{2}$/)?.[0];
+  const anchor = root?.timing?.startedAt ?? root?.timing?.seenActiveAt ?? observedAt;
+  const children = new Map;
+  for (const n of nodes)
+    if (n.parentId) {
+      const rows = children.get(n.parentId) ?? [];
+      rows.push(n);
+      children.set(n.parentId, rows);
+    }
+  const windows = [];
+  function visit(n, subtree, seen) {
+    if (seen.has(n.id) || n.kind === "trigger" || n.state === "disabled")
+      return;
+    seen.add(n.id);
+    subtree.push(n);
+    for (const child of children.get(n.id) ?? [])
+      visit(child, subtree, seen);
+  }
+  for (const target of nodes.filter((n) => n.type === "DeepSkyObjectContainer" && n.state !== "disabled")) {
+    let parent = target.parentId;
+    const ancestry = new Set([target.id]);
+    let conditional = false;
+    while (parent) {
+      const n = nodes.find((n) => n.id === parent);
+      if (!n || ancestry.has(parent)) {
+        conditional = true;
+        break;
+      }
+      ancestry.add(parent);
+      if (n.kind === "trigger" || n.state === "disabled") {
+        conditional = true;
+        break;
+      }
+      parent = n.parentId;
+    }
+    if (conditional)
+      continue;
+    const subtree = [];
+    visit(target, subtree, new Set);
+    const clock = (n) => n.details.timeReferenceFixed === true ? rolloverDeadline(n.details, anchor, zone, night) : NaN;
+    const starts = subtree.filter((n) => n.type === "WaitForTime").map(clock).filter(Number.isFinite);
+    const ends = subtree.filter((n) => n.type === "TimeCondition").map(clock).filter(Number.isFinite);
+    if (!starts.length || !ends.length)
+      continue;
+    const start = Math.min(...starts), end = Math.max(...ends);
+    if (end <= start || end - start > 86400000)
+      continue;
+    const countNodes = subtree.map((n) => n.id === target.id ? { ...n, parentId: null } : n);
+    windows.push({ id: target.id, name: target.name, start, end, captured: sequenceImagingProgress(countNodes).captured });
+  }
+  return windows.sort((a, b) => a.start - b.start);
+}
+function scheduledPercent(windows, now) {
+  const duration = windows.reduce((s, w) => s + w.end - w.start, 0);
+  if (!duration || !Number.isFinite(now))
+    return null;
+  const elapsed = windows.reduce((s, w) => s + Math.max(0, Math.min(w.end - w.start, now - w.start)), 0);
+  return Math.round(elapsed / duration * 100);
+}
+var nightTimelineState = null;
+var nightTimelineColors = ["#2dd4bf", "#60a5fa", "#c084fc", "#fbbf24"];
+function updateNightTimelineClock(live, now = Date.now()) {
+  const host = document.getElementById("sequence-night-timeline");
+  if (!host || host.hidden || !nightTimelineState)
+    return;
+  const at = live ? now : Math.min(now, nightTimelineState.observed);
+  const percent = scheduledPercent(nightTimelineState.windows, at);
+  const label = document.getElementById("sequence-percent");
+  if (label)
+    label.textContent = percent === null ? "" : `${percent}% time`;
+  for (const block of host.querySelectorAll("[data-night-window]")) {
+    const start = Number(block.dataset.start), end = Number(block.dataset.end);
+    const p = Math.max(0, Math.min(1, (at - start) / (end - start))) * 100;
+    block.querySelector(".night-window-fill").style.width = p + "%";
+  }
+  host.setAttribute("aria-label", `Planned observing time: ${percent ?? 0}% elapsed${live ? "" : " at last observation"}`);
+}
+function renderNightTimeline(windows, observedAt, zone, live) {
+  let host = document.getElementById("sequence-night-timeline");
+  if (!host) {
+    host = document.createElement("div");
+    host.id = "sequence-night-timeline";
+    document.getElementById("sequence-coverage").parentElement.after(host);
+  }
+  host.hidden = !windows.length;
+  if (!windows.length) {
+    nightTimelineState = null;
+    return;
+  }
+  nightTimelineState = { windows, observed: Date.parse(observedAt), zone };
+  const signature = JSON.stringify([windows, zone]);
+  if (host.dataset.signature === signature) {
+    updateNightTimelineClock(live);
+    return;
+  }
+  host.dataset.signature = signature;
+  if (!document.getElementById("sequence-night-timeline-style")) {
+    const style = document.createElement("style");
+    style.id = "sequence-night-timeline-style";
+    style.textContent = `
+#sequence-night-timeline{margin:10px 0 14px;font-size:12px;color:var(--muted)}
+#sequence-night-timeline .night-caption{margin-bottom:7px}
+#sequence-night-timeline .night-bar{position:relative;height:18px;border-radius:4px;overflow:hidden;background:var(--border)}
+#sequence-night-timeline .night-window{position:absolute;top:0;height:100%;background:color-mix(in srgb,var(--night-color) 20%,transparent);border-right:2px solid var(--panel,#101922);box-sizing:border-box}
+#sequence-night-timeline .night-window-fill{height:100%;background:var(--night-color);opacity:.9}
+#sequence-night-timeline .night-targets{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 14px;margin-top:9px}
+#sequence-night-timeline .night-name{display:flex;align-items:center;gap:6px;min-width:0;color:var(--text);font-weight:600}
+#sequence-night-timeline .night-name span:last-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#sequence-night-timeline .night-dot{width:8px;height:8px;border-radius:50%;background:var(--night-color);flex-shrink:0}
+#sequence-night-timeline .night-details{margin:3px 0 0 14px;font-variant-numeric:tabular-nums;line-height:1.5}
+@media(max-width:480px){#sequence-night-timeline .night-targets{grid-template-columns:1fr}}
+`;
+    document.head.append(style);
+  }
+  const format = new Intl.DateTimeFormat([], { timeZone: zone, hour: "numeric", minute: "2-digit" });
+  const zoneName = new Intl.DateTimeFormat("en", { timeZone: zone, timeZoneName: "short" }).formatToParts(new Date(windows[0].start)).find((p) => p.type === "timeZoneName")?.value ?? zone;
+  const caption = document.createElement("div");
+  caption.className = "night-caption";
+  caption.textContent = `Planned observing time · ${zoneName} · elapsed time, not image completion`;
+  const bar = document.createElement("div");
+  bar.className = "night-bar";
+  const list = document.createElement("div");
+  list.className = "night-targets";
+  const start = Math.min(...windows.map((w) => w.start)), end = Math.max(...windows.map((w) => w.end));
+  windows.forEach((w, i) => {
+    const color = nightTimelineColors[i % nightTimelineColors.length];
+    const range = `${format.format(w.start)}–${format.format(w.end)}`;
+    const captured = w.captured === null ? "image count unavailable" : `${w.captured.toLocaleString()} images taken`;
+    const block = document.createElement("div");
+    block.className = "night-window";
+    block.dataset.nightWindow = w.id;
+    block.dataset.start = String(w.start);
+    block.dataset.end = String(w.end);
+    block.style.left = (w.start - start) / (end - start) * 100 + "%";
+    block.style.width = (w.end - w.start) / (end - start) * 100 + "%";
+    block.style.setProperty("--night-color", color);
+    block.title = `${w.name} · ${range} ${zoneName} · ${captured}`;
+    const fill = document.createElement("div");
+    fill.className = "night-window-fill";
+    block.append(fill);
+    bar.append(block);
+    const item = document.createElement("div");
+    item.style.setProperty("--night-color", color);
+    const name = document.createElement("div");
+    name.className = "night-name";
+    name.title = w.name;
+    const dot = document.createElement("span");
+    dot.className = "night-dot";
+    dot.setAttribute("aria-hidden", "true");
+    const title = document.createElement("span");
+    title.textContent = w.name;
+    name.append(dot, title);
+    const details = document.createElement("div");
+    details.className = "night-details";
+    details.textContent = `${range} · ${captured}`;
+    item.append(name, details);
+    list.append(item);
+  });
+  host.replaceChildren(caption, bar, list);
+  updateNightTimelineClock(live);
 }
 
 // web/sequence-current.ts
@@ -30778,7 +31424,7 @@ function zonedTime(day, hour, zone) {
   let result = wall;
   const f = new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
   for (let i = 0;i < 3; i++) {
-    const p = Object.fromEntries(f.formatToParts(new Date(result)).map((p2) => [p2.type, p2.value]));
+    const p = Object.fromEntries(f.formatToParts(new Date(result)).map((p) => [p.type, p.value]));
     const asUTC = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
     result += wall - asUTC;
   }
@@ -30813,6 +31459,7 @@ function visibility(ra, dec, site, day) {
   return value;
 }
 var svgNS = "http://www.w3.org/2000/svg";
+var visibilityGraphId = 0;
 function svg(tag, attrs, text) {
   const e = document.createElementNS(svgNS, tag);
   for (const [k, v] of Object.entries(attrs))
@@ -30829,28 +31476,32 @@ function renderVisibility(host, ra, dec, site, day, width = 1000, now = Date.now
   const clock = (t) => new Intl.DateTimeFormat(undefined, { timeZone: site.timeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(t);
   for (let i = 0;i < v.samples.length - 1; i++) {
     const p = v.samples[i], sun = p.sun;
-    graph.append(svg("rect", { x: x(p.time), y: T, width: x(v.samples[i + 1].time) - x(p.time) + 0.5, height: H - T - B, fill: sun > -6 ? "#536477" : sun > -12 ? "#34465e" : sun > -18 ? "#222f49" : "#111e30" }));
+    graph.append(svg("rect", { x: x(p.time), y: T, width: x(v.samples[i + 1].time) - x(p.time) + 0.5, height: H - T - B, fill: sun > -6 ? "var(--sky-day, #536477)" : sun > -12 ? "var(--sky-nautical, #34465e)" : sun > -18 ? "var(--sky-astronomical, #222f49)" : "var(--sky-night, #111e30)" }));
   }
   for (const a of [0, 30, 60, 90]) {
-    graph.append(svg("line", { x1: L, x2: W - R, y1: y(a), y2: y(a), stroke: "#587086", "stroke-opacity": ".4", "stroke-dasharray": a === 30 ? "4 5" : "0" }), svg("text", { x: L - 7, y: y(a) + 4, "text-anchor": "end", fill: "#8da6bb", "font-size": 12 }, a + "°"));
+    graph.append(svg("line", { x1: L, x2: W - R, y1: y(a), y2: y(a), stroke: "var(--chart-grid, #587086)", "stroke-opacity": ".4", "stroke-dasharray": a === 30 ? "4 5" : "0" }), svg("text", { x: L - 7, y: y(a) + 4, "text-anchor": "end", fill: "var(--muted)", "font-size": 12 }, a + "°"));
   }
   for (let t = v.start;t <= v.end; t += (compact ? 6 : W < 850 ? 3 : 2) * 3600000)
-    graph.append(svg("text", { x: x(t), y: H - 7, fill: "#9db4c8", "font-size": 11, "text-anchor": "middle" }, clock(t)));
-  const d = v.samples.map((p, i) => (i ? "L" : "M") + x(p.time).toFixed(1) + "," + y(Math.max(0, p.altitude)).toFixed(1)).join(" ");
-  graph.append(svg("path", { d, fill: "none", stroke: "#68daca", "stroke-width": 3, "stroke-linejoin": "round" }));
+    graph.append(svg("text", { x: x(t), y: H - 7, fill: "var(--muted)", "font-size": 11, "text-anchor": "middle" }, clock(t)));
+  const clipId = "target-altitude-clip-" + ++visibilityGraphId, defs = svg("defs", {}), clip = svg("clipPath", { id: clipId, clipPathUnits: "userSpaceOnUse" });
+  clip.append(svg("rect", { x: L, y: T, width: W - L - R, height: H - T - B }));
+  defs.append(clip);
+  graph.append(defs);
+  const d = v.samples.map((p, i) => (i ? "L" : "M") + x(p.time).toFixed(1) + "," + y(p.altitude).toFixed(1)).join(" ");
+  graph.append(svg("path", { d, fill: "none", stroke: "var(--accent)", "stroke-width": 3, "stroke-linejoin": "round", "clip-path": `url(#${clipId})`, "data-altitude-curve": "1" }));
   const events = [{ time: v.rise, label: "Rise" }, { time: v.transit, label: `Meridian ${v.peak.toFixed(0)}°` }, { time: v.set, label: "Set" }];
   const labels = [];
   for (const event of events)
     if (event.time != null && event.time >= v.start && event.time <= v.end) {
       const px = x(event.time);
-      graph.append(svg("line", { x1: px, x2: px, y1: T, y2: H - B, stroke: "#78b9ce", "stroke-dasharray": "3 5", "stroke-opacity": ".6" }));
+      graph.append(svg("line", { x1: px, x2: px, y1: T, y2: H - B, stroke: "var(--chart-ra, #78b9ce)", "stroke-dasharray": "3 5", "stroke-opacity": ".6" }));
       if (!compact) {
         const lx = Math.min(W - 85, Math.max(85, px)), ly = labels.some((label) => Math.abs(label.x - lx) < 130 && label.y === 16) ? 30 : 16;
         labels.push({ x: lx, y: ly });
-        graph.append(svg("text", { x: lx, y: ly, "text-anchor": "middle", fill: "#b4d8e1", "font-size": 11 }, event.label + " " + clock(event.time)));
+        graph.append(svg("text", { x: lx, y: ly, "text-anchor": "middle", fill: "var(--text)", "font-size": 11 }, event.label + " " + clock(event.time)));
       }
     }
-  graph.append(svg("line", { "data-observing-clock": "1", "data-start": v.start, "data-end": v.end, "data-width": W, x1: x(now), x2: x(now), y1: T, y2: H - B, stroke: "#f3c978", "stroke-width": 1.5, visibility: now >= v.start && now <= v.end ? "visible" : "hidden" }));
+  graph.append(svg("line", { "data-observing-clock": "1", "data-start": v.start, "data-end": v.end, "data-width": W, x1: x(now), x2: x(now), y1: T, y2: H - B, stroke: "var(--amber)", "stroke-width": 1.5, visibility: now >= v.start && now <= v.end ? "visible" : "hidden" }));
   host.replaceChildren(graph);
   const eventLegend = document.createElement("div");
   eventLegend.className = "target-events";
@@ -30891,68 +31542,113 @@ function framingUrl(raHours, dec, rotation, profile, gatewayBase = "") {
   const params = new URLSearchParams({ ra: String(raHours * 15 % 360), dec: String(dec), rotation: String((rotation % 360 + 360) % 360), width: String(profile.fieldWidthDegrees), height: String(profile.fieldHeightDegrees) });
   return gatewayBase + "/api/v1/framing/image?" + params;
 }
+async function framingResponse(url, signal) {
+  const response = await fetch(url, { signal });
+  if (!response.ok)
+    throw Error("Survey unavailable");
+  const blob = await response.blob();
+  if (blob.size > 2000000 || !["image/svg+xml", "image/jpeg"].includes(blob.type.split(";")[0]))
+    throw Error("Invalid survey image");
+  return blob;
+}
 function targetFraming(ra, dec, rotation, profileId) {
   const host = document.createElement("figure");
   host.className = "target-framing";
   const image = document.createElement("img");
-  image.loading = "lazy";
   image.decoding = "async";
   image.alt = "Survey preview of the target in the camera field";
   image.hidden = true;
   const status = document.createElement("span");
   status.className = "target-framing-status";
-  status.textContent = "Loading camera framing…";
   const caption = document.createElement("figcaption");
-  caption.textContent = "DSS2 / CDS · survey preview";
+  caption.textContent = "DSS2 · CDS / NASA SkyView · survey reference";
   host.append(image, status, caption);
   if (typeof ra !== "number" || typeof dec !== "number" || typeof rotation !== "number" || !profileId) {
     status.textContent = "Camera framing requires target coordinates and a rig profile.";
     return host;
   }
-  profiles ??= fetch(base() + "/api/v1/framing/profiles").then((r) => {
-    if (!r.ok)
-      throw Error("Framing configuration unavailable");
-    return r.json();
-  }).catch(() => []);
-  profiles.then((list) => {
-    const profile = list.find((p) => p.profileId.toLowerCase() === profileId.toLowerCase());
-    if (!profile) {
-      status.textContent = "Camera field of view is not configured for this profile.";
-      return;
-    }
-    const url = framingUrl(ra, dec, rotation, profile, base());
-    if (!url) {
-      status.textContent = "Camera framing unavailable.";
-      return;
-    }
-    caption.textContent = `${profile.fieldWidthDegrees.toFixed(2)}° × ${profile.fieldHeightDegrees.toFixed(2)}° · PA ${rotation.toFixed(1)}° · DSS2 / CDS`;
-    host.title = profile.rigName + " · estimated camera field from configured optics; survey image, not a captured exposure";
-    image.onload = () => {
-      image.style.opacity = "1";
-      image.hidden = false;
-      status.hidden = true;
-    };
-    image.onerror = () => {
+  let current;
+  const release = () => {
+    image.removeAttribute("src");
+  };
+  const load = async () => {
+    current?.abort();
+    const controller = new AbortController;
+    current = controller;
+    status.hidden = false;
+    status.textContent = "Loading camera framing…";
+    image.hidden = true;
+    release();
+    const failure = (message) => {
+      if (current !== controller)
+        return;
       image.hidden = true;
+      release();
       status.hidden = false;
-      status.textContent = "Survey unavailable";
+      status.textContent = message + " · ";
       const retry = document.createElement("button");
       retry.type = "button";
       retry.textContent = "Retry";
-      retry.onclick = () => {
-        status.textContent = "Loading camera framing…";
-        image.hidden = false;
-        image.style.opacity = "0";
-        image.src = url;
-      };
+      retry.onclick = () => void load();
       status.append(retry);
     };
-    image.width = 512;
-    image.height = Math.round(512 * profile.fieldHeightDegrees / profile.fieldWidthDegrees);
-    image.style.opacity = "0";
-    image.hidden = false;
-    image.src = url;
-  });
+    const deadline = setTimeout(() => {
+      controller.abort();
+      failure("Survey timed out");
+    }, 60000);
+    try {
+      profiles ??= fetch(base() + "/api/v1/framing/profiles", { signal: controller.signal }).then(async (r) => {
+        if (!r.ok)
+          throw Error("Framing configuration unavailable");
+        return await r.json();
+      }).catch((error) => {
+        profiles = undefined;
+        throw error;
+      });
+      const list = await profiles;
+      controller.signal.throwIfAborted();
+      const profile = list.find((p) => p.profileId.toLowerCase() === profileId.toLowerCase());
+      if (!profile)
+        throw Error("Camera field of view is not configured for this profile.");
+      const url = framingUrl(ra, dec, rotation, profile, base());
+      if (!url)
+        throw Error("Camera framing unavailable.");
+      caption.textContent = `${profile.fieldWidthDegrees.toFixed(2)}° × ${profile.fieldHeightDegrees.toFixed(2)}° · PA ${rotation.toFixed(1)}° · DSS2 / CDS or NASA SkyView (reference colors)`;
+      host.title = profile.rigName + " · estimated camera field from configured optics; survey image, not a captured exposure";
+      const blob = await framingResponse(url, controller.signal);
+      controller.signal.throwIfAborted();
+      if (current !== controller)
+        return;
+      const encoded = await new Promise((resolve, reject) => {
+        const reader = new FileReader;
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(Error("Invalid survey image"));
+        reader.readAsDataURL(blob);
+      });
+      controller.signal.throwIfAborted();
+      if (current !== controller)
+        return;
+      image.src = encoded;
+      await image.decode();
+      controller.signal.throwIfAborted();
+      if (current !== controller)
+        return;
+      image.hidden = false;
+      status.hidden = true;
+    } catch (error) {
+      if (current !== controller)
+        return;
+      failure(controller.signal.aborted ? "Survey timed out" : error instanceof Error ? error.message : "Survey unavailable");
+    } finally {
+      clearTimeout(deadline);
+    }
+  };
+  load();
+  host.addEventListener("dispose", () => {
+    current?.abort();
+    current = undefined;
+    release();
+  }, { once: true });
   return host;
 }
 
@@ -30978,6 +31674,7 @@ function finishTargetHeaders() {
       resize.unobserve(chart);
       plots.delete(chart);
     }
+    entry.panel.querySelector(".target-framing")?.dispatchEvent(new Event("dispose"));
     headers.delete(id);
   }
 }
@@ -30991,6 +31688,7 @@ function targetHeader(target, site, profileId, now = Date.now()) {
     return cached.panel;
   }
   if (cached) {
+    cached.panel.querySelector(".target-framing")?.dispatchEvent(new Event("dispose"));
     const old = cached.panel.querySelector(".target-altitude");
     if (old) {
       resize.unobserve(old);
@@ -31000,7 +31698,7 @@ function targetHeader(target, site, profileId, now = Date.now()) {
   const panel = document.createElement("div");
   panel.className = "target-planning";
   headers.set(target.id, { key, panel });
-  const value = (key2) => target.editableFields?.find((f) => f.key === key2)?.value;
+  const value = (key) => target.editableFields?.find((f) => f.key === key)?.value;
   const ra = value("RightAscension"), dec = value("Declination"), rotation = value("Rotation");
   const coordinates = document.createElement("div");
   coordinates.className = "target-coordinates";
@@ -31067,14 +31765,14 @@ function field2(n, key) {
   return n.editableFields?.find((f) => f.key === key)?.value;
 }
 function glyph(n) {
-  const svg2 = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg2.setAttribute("viewBox", "0 0 24 24");
-  svg2.setAttribute("aria-hidden", "true");
-  svg2.classList.add("sequence-glyph");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.classList.add("sequence-glyph");
   const icon = sequenceIcon(n.type, n.kind);
-  svg2.dataset.icon = icon.key;
-  svg2.innerHTML = icon.svg;
-  return svg2;
+  svg.dataset.icon = icon.key;
+  svg.innerHTML = icon.svg;
+  return svg;
 }
 function watcherState(item, scope, live) {
   if (item.state === "disabled")
@@ -31133,7 +31831,7 @@ function renderSequenceView(tree, nodes, options) {
     mark.setAttribute("aria-label", item.state === "completed" ? "Successfully completed" : item.state === "failed" ? "Error" : item.state.charAt(0).toUpperCase() + item.state.slice(1));
     r.append(mark);
     let target = byId.get(item.parentId ?? "");
-    for (let depth2 = 0;target && target.type !== "DeepSkyObjectContainer" && depth2 < 17; depth2++)
+    for (let depth = 0;target && target.type !== "DeepSkyObjectContainer" && depth < 17; depth++)
       target = byId.get(target.parentId ?? "");
     const summary = sequenceDetail(item, target?.type === "DeepSkyObjectContainer" ? target : undefined, options.cooling);
     const detail = el("span", "sequence-detail" + (["SendToDiscordWebhook", "SendNotificationInstruction"].includes(item.type) ? " sequence-message" : ""), summary);
@@ -31171,14 +31869,14 @@ function renderSequenceView(tree, nodes, options) {
     }
     if (item.canStructure) {
       const actions = el("span", "sequence-structure-actions");
-      for (const [action, label2, icon] of [["move", "Move", "⠿"], ["duplicate", "Duplicate", "⧉"], ["delete", "Delete", "×"]]) {
+      for (const [action, label, icon] of [["move", "Move", "⠿"], ["duplicate", "Duplicate", "⧉"], ["delete", "Delete", "×"]]) {
         const b = el("button", "sequence-" + action, icon);
         b.type = "button";
         const shapes = { move: '<circle cx="9" cy="5" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="19" r="1"/>', duplicate: '<rect x="8" y="8" width="12" height="12" rx="1"/><path d="M16 8V4H4v12h4"/>', delete: '<path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 10v7m4-7v7"/>' };
         b.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true">' + shapes[action] + "</svg>";
         b.dataset.structureAction = action;
-        b.setAttribute("aria-label", label2 + " " + sequenceName(item));
-        b.title = label2 + " " + sequenceName(item) + (action === "move" ? " · drag or Alt+↑/↓" : "");
+        b.setAttribute("aria-label", label + " " + sequenceName(item));
+        b.title = label + " " + sequenceName(item) + (action === "move" ? " · drag or Alt+↑/↓" : "");
         actions.append(b);
       }
       r.append(actions);
@@ -31311,9 +32009,24 @@ function cancelSequenceScrollRestore() {
 }
 var sequenceViewRefresh = () => {};
 var jumpToCurrent = () => {};
+var lastAutoCenteredStep = "";
 var treeSignature = "";
 var previewRevision = "";
 var histogramValues = [];
+var previewBrightening = true;
+function updatePreviewTreatment() {
+  const image = node("latest-preview"), thumb = node("last-preview");
+  const dark = image.dataset.darkAutofocus === "true";
+  const filter = dark && previewBrightening ? "brightness(8) contrast(1.15)" : "";
+  image.style.filter = filter;
+  thumb.style.filter = filter;
+  const button = document.getElementById("image-brighten");
+  if (button) {
+    button.hidden = !dark;
+    button.setAttribute("aria-pressed", String(previewBrightening));
+  }
+  text("image-caption", (image.dataset.previewCaption ?? "") + (filter ? " · brightened for display" : ""));
+}
 var collapsed = new Set;
 var cachedSession = "";
 var exposure = null;
@@ -31375,6 +32088,16 @@ function mountDashboard() {
   });
   setExpanded(false);
   const image = node("latest-preview");
+  const brighten = document.createElement("button");
+  brighten.id = "image-brighten";
+  brighten.textContent = "Brighten";
+  brighten.hidden = true;
+  brighten.title = "Brighten dark autofocus previews for viewing. Saved images are unchanged.";
+  brighten.onclick = () => {
+    previewBrightening = !previewBrightening;
+    updatePreviewTreatment();
+  };
+  node("image-fit").before(brighten);
   image.onload = () => {
     const canvas = document.createElement("canvas");
     canvas.width = 160;
@@ -31389,6 +32112,9 @@ function mountDashboard() {
       const lum = 0.2126 * rgba[i] + 0.7152 * rgba[i + 1] + 0.0722 * rgba[i + 2];
       histogramValues[Math.min(63, Math.floor(lum / 4))]++;
     }
+    const low = histogramValues.slice(0, 3).reduce((a, b) => a + b, 0) / 16000;
+    image.dataset.darkAutofocus = String(image.dataset.autofocusPreview === "true" && low > 0.99);
+    updatePreviewTreatment();
     renderHistogram();
   };
   image.onerror = () => {
@@ -31419,26 +32145,26 @@ function mountDashboard() {
   };
 }
 function renderHistogram() {
-  const svg2 = node("histogram");
-  svg2.setAttribute("preserveAspectRatio", histogramValues.length ? "none" : "xMidYMid meet");
-  svg2.replaceChildren();
+  const svg = node("histogram");
+  svg.setAttribute("preserveAspectRatio", histogramValues.length ? "none" : "xMidYMid meet");
+  svg.replaceChildren();
   if (!histogramValues.length) {
     const t = svgElement("text", {
       x: "150",
       y: "52",
       "text-anchor": "middle",
-      fill: "#61788d",
+      fill: "var(--dim)",
       "font-size": "10"
     });
     t.textContent = "Histogram available with preview";
-    svg2.append(t);
+    svg.append(t);
     return;
   }
   const max = Math.max(...histogramValues);
   const d = histogramValues.map((v, i) => `${i ? "L" : "M"}${i * 300 / 63},${90 - v / Math.max(1, max) * 84}`).join(" ");
-  svg2.append(svgElement("path", {
+  svg.append(svgElement("path", {
     d: `M0,95 ${d.replace("M", "L")} L300,95 Z`,
-    fill: "#7895a9",
+    fill: "var(--muted)",
     opacity: ".8"
   }));
 }
@@ -31449,8 +32175,8 @@ function svgElement(tag, attrs) {
   return element;
 }
 function plot(id, series, focus = false) {
-  const svg2 = node(id);
-  svg2.replaceChildren();
+  const svg = node(id);
+  svg.replaceChildren();
   const points = series.flat().filter((p) => p.every(Number.isFinite));
   const minX = points.length ? Math.min(...points.map((p) => p[0])) : 0, maxX = points.length ? Math.max(...points.map((p) => p[0])) : 1;
   let minY = points.length ? Math.min(...points.map((p) => p[1])) : 0, maxY = points.length ? Math.max(...points.map((p) => p[1])) : 1;
@@ -31464,54 +32190,54 @@ function plot(id, series, focus = false) {
   }
   for (let i = 0;i <= 4; i++) {
     const y = 12 + i * 27;
-    svg2.append(svgElement("line", {
+    svg.append(svgElement("line", {
       x1: "35",
       x2: "452",
       y1: String(y),
       y2: String(y),
-      stroke: "#293d4b",
+      stroke: "var(--chart-grid, #293d4b)",
       "stroke-width": ".8"
     }));
     const t = svgElement("text", {
       x: "29",
       y: String(y + 3),
       "text-anchor": "end",
-      fill: "#90a6b8",
+      fill: "var(--chart-label, #90a6b8)",
       "font-size": "9"
     });
     t.textContent = format(maxY - i * (maxY - minY) / 4, 1);
-    svg2.append(t);
+    svg.append(t);
   }
   for (let i = 0;i <= 5; i++) {
     const x = 35 + i * 83;
-    svg2.append(svgElement("line", {
+    svg.append(svgElement("line", {
       x1: String(x),
       x2: String(x),
       y1: "12",
       y2: "120",
-      stroke: "#293d4b",
+      stroke: "var(--chart-grid, #293d4b)",
       "stroke-width": ".6"
     }));
     const t = svgElement("text", {
       x: String(x),
       y: "138",
       "text-anchor": "middle",
-      fill: "#90a6b8",
+      fill: "var(--chart-label, #90a6b8)",
       "font-size": "8"
     });
     t.textContent = points.length ? focus ? format(minX + i * (maxX - minX) / 5, 0) : String(Math.round(minX + i * (maxX - minX) / 5)) : "—";
-    svg2.append(t);
+    svg.append(t);
   }
   if (!points.length) {
     const t = svgElement("text", {
       x: "244",
       y: "69",
       "text-anchor": "middle",
-      fill: "#718b9f",
+      fill: "var(--muted)",
       "font-size": "11"
     });
     t.textContent = focus ? "No autofocus measurements received" : "No guide samples received";
-    svg2.append(t);
+    svg.append(t);
     return;
   }
   const xy = (p) => [
@@ -31524,21 +32250,21 @@ function plot(id, series, focus = false) {
       const [x, y] = xy(p);
       return `${j ? "L" : "M"}${x},${y}`;
     }).join(" ");
-    svg2.append(svgElement("path", {
+    svg.append(svgElement("path", {
       d,
-      stroke: focus ? "#39d9c5" : i ? "#ee839b" : "#5297ff",
+      stroke: focus ? "var(--accent)" : i ? "var(--chart-dec, #ee839b)" : "var(--chart-ra, #5297ff)",
       "stroke-width": "1.6",
       fill: "none"
     }));
     if (focus)
       for (const p of valid) {
         const [x, y] = xy(p);
-        svg2.append(svgElement("circle", {
+        svg.append(svgElement("circle", {
           cx: String(x),
           cy: String(y),
           r: "3",
-          fill: "#39d9c5",
-          stroke: "#10242a",
+          fill: "var(--accent)",
+          stroke: "var(--surface)",
           "stroke-width": "1.5"
         }));
       }
@@ -31558,7 +32284,7 @@ function targetName(nodes) {
 function sequenceLabel(item) {
   return [sequenceName(item), sequenceDetail(item)].filter(Boolean).join(" · ");
 }
-function renderSequence(sequence, live, session, site, cooling = {}, profileId, observedAt) {
+function renderSequence(sequence, live, session, site, cooling = {}, profileId, observedAt, followActive = false) {
   const nodes = [...Array.isArray(sequence.nodes) ? sequence.nodes : []];
   if (sequence.mode !== "simple") {
     for (const [type, name] of [["StartAreaContainer", "Start"], ["TargetAreaContainer", "Targets"], ["EndAreaContainer", "End"]]) {
@@ -31577,18 +32303,34 @@ function renderSequence(sequence, live, session, site, cooling = {}, profileId, 
   }
   const root = nodes.find((n) => n.type === "SequenceRootContainer");
   const instructions = nodes.filter((n) => n.kind === "instruction");
-  const completed = instructions.filter((n) => n.state === "completed").length;
+  const imaging = sequenceImagingProgress(nodes, sequence.truncated === true);
   const active = currentSequenceNode(nodes, sequence.activeNodeIds);
+  const replay = document.body.classList.contains("replay-mode");
+  const focusKey = live && active ? JSON.stringify([replay, session, sequence.executionId, active.id]) : "";
+  const autoCenter = followActive && !!focusKey && (replay || focusKey !== lastAutoCenteredStep);
+  if (!focusKey)
+    lastAutoCenteredStep = "";
+  if (autoCenter && active)
+    for (const id of sequenceAncestors(nodes, active.id))
+      collapsed.delete(id);
   text("target-title", targetName(nodes));
   node("target-title").hidden = !targetName(nodes);
   text("preview-target", targetName(nodes) ? "— " + targetName(nodes) : "");
   text("sequence-mode", sequence.available ? !instructions.length ? "Empty sequence" : root?.name && root.name !== "Advanced Sequence" ? root.name : sequence.mode === "simple" ? "Simple sequence" : "Loaded sequence" : sequence.reason ?? "Waiting for sequence");
-  text("sequence-coverage", instructions.length ? `${completed} / ${instructions.length} steps complete` : "No instructions loaded");
-  const pct = instructions.length ? Math.round(completed / instructions.length * 100) : 0;
-  text("sequence-percent", instructions.length ? pct + "%" : "—");
-  node("sequence-progress").style.width = pct + "%";
-  node("sequence-progress").parentElement.setAttribute("aria-valuenow", String(pct));
-  node("sequence-progress").parentElement.setAttribute("aria-valuemax", "100");
+  text("sequence-coverage", imaging.label);
+  text("sequence-percent", imaging.percent === null ? "" : imaging.percent + "%");
+  const progress = node("sequence-progress");
+  const track = progress.parentElement;
+  track.hidden = imaging.percent === null;
+  progress.style.width = (imaging.percent ?? 0) + "%";
+  track.setAttribute("aria-label", "Images taken against planned exposures");
+  if (imaging.percent === null)
+    track.removeAttribute("aria-valuenow");
+  else
+    track.setAttribute("aria-valuenow", String(imaging.percent));
+  track.setAttribute("aria-valuemax", "100");
+  const nightWindows = imaging.planned === null && observedAt && site?.timeZone ? nightTimeline(nodes, observedAt, site.timeZone) : [];
+  renderNightTimeline(nightWindows, observedAt ?? "", site?.timeZone ?? "UTC", live);
   text("sequence-running", !live ? "Cached" : active ? active.state === "waiting" ? "Waiting" : "Executing" : instructions.length ? "Idle" : "");
   node("sequence-warning").hidden = sequence.truncated !== true;
   text("sequence-warning", "Partial sequence · projection limit reached; some steps are not shown.");
@@ -31603,7 +32345,7 @@ function renderSequence(sequence, live, session, site, cooling = {}, profileId, 
       for (const group of groups)
         collapsed.add(group.id);
     treeSignature = "";
-    renderSequence(sequence, live, session, site, cooling, profileId, observedAt);
+    renderSequence(sequence, live, session, site, cooling, profileId, observedAt, followActive);
   };
   const index = nodes.findIndex((n) => n.id === active?.id);
   const upcoming = nodes.slice(index + 1).find((n) => n.kind === "instruction" && n.state === "pending");
@@ -31617,17 +32359,30 @@ function renderSequence(sequence, live, session, site, cooling = {}, profileId, 
       collapsed.delete(id);
     treeSignature = "";
     sequenceViewRefresh();
-    const row = [...node("sequence-tree").querySelectorAll("[data-node-id]")].find((row2) => row2.dataset.nodeId === active.id);
+    const row = [...node("sequence-tree").querySelectorAll("[data-node-id]")].find((row) => row.dataset.nodeId === active.id);
     cancelSequenceScrollRestore();
     row?.scrollIntoView({ block: "center", behavior: "smooth" });
   };
-  sequenceViewRefresh = () => renderSequence(sequence, live, session, site, cooling, profileId, observedAt);
+  sequenceViewRefresh = () => renderSequence(sequence, live, session, site, cooling, profileId, observedAt, followActive);
   const expanded = document.querySelector(".sequence-panel").classList.contains("is-expanded");
-  const signature = JSON.stringify([session, live, nodes, site, cooling, profileId, expanded, [...collapsed]]);
-  if (signature === treeSignature)
-    return;
-  treeSignature = signature;
   const tree = node("sequence-tree");
+  const centerActive = () => {
+    if (autoCenter && active)
+      requestAnimationFrame(() => {
+        const row = [...tree.querySelectorAll("[data-node-id]")].find((r) => r.dataset.nodeId === active.id);
+        if (row) {
+          const frame = tree.getBoundingClientRect(), rect = row.getBoundingClientRect();
+          tree.scrollTop += rect.top - frame.top - (tree.clientHeight - rect.height) / 2;
+          lastAutoCenteredStep = focusKey;
+        }
+      });
+  };
+  const signature = JSON.stringify([session, live, nodes, site, cooling, profileId, expanded, followActive, [...collapsed]]);
+  if (signature === treeSignature) {
+    centerActive();
+    return;
+  }
+  treeSignature = signature;
   const scroll = sequenceScrollRestore?.top ?? tree.scrollTop;
   cancelSequenceScrollRestore();
   renderSequenceView(tree, nodes, {
@@ -31641,7 +32396,7 @@ function renderSequence(sequence, live, session, site, cooling = {}, profileId, 
     toggle(id) {
       collapsed.has(id) ? collapsed.delete(id) : collapsed.add(id);
       treeSignature = "";
-      renderSequence(sequence, live, session, site, cooling, profileId, observedAt);
+      renderSequence(sequence, live, session, site, cooling, profileId, observedAt, followActive);
     }
   });
   tree.scrollTop = scroll;
@@ -31649,8 +32404,10 @@ function renderSequence(sequence, live, session, site, cooling = {}, profileId, 
     tree.scrollTop = scroll;
     sequenceScrollRestore = undefined;
   }) };
+  centerActive();
 }
 function updateExposureClock(live = true, now = Date.now()) {
+  updateNightTimelineClock(live, now);
   const sequenceProgress = document.getElementById("sequence-exposure-inline");
   if (sequenceProgress)
     sequenceProgress.hidden = !exposure || !live;
@@ -31676,7 +32433,7 @@ function updateExposureClock(live = true, now = Date.now()) {
   node("exposure-progress").style.width = Math.min(100, pct) + "%";
   node("exposure-track").setAttribute("aria-valuenow", String(Math.floor(pct)));
 }
-function renderDashboard(states, live, session, now = Date.now()) {
+function renderDashboard(states, live, session, now = Date.now(), followActive = false) {
   if (cachedSession !== session) {
     collapsed.clear();
     treeSignature = "";
@@ -31700,20 +32457,23 @@ function renderDashboard(states, live, session, now = Date.now()) {
     vals.replaceChildren();
     const s = connected ? state : {};
     if (key === "camera") {
-      const primary = document.createElement("div");
-      primary.className = "primary-reading";
-      primary.textContent = format(s.temperature, 1, "°C");
-      const small = document.createElement("small");
-      small.textContent = `target ${format(s.temperatureSetPoint, 0, "°C")}`;
-      primary.append(small);
-      const dl = document.createElement("dl");
-      dl.className = "compact-readings";
-      readings(dl, {
-        Cooler: format(s.coolerPower, 0, "%"),
-        Gain: format(s.gain, 0),
-        Bin: numeric2(s.binX) && numeric2(s.binY) ? `${s.binX}×${s.binY}` : "—"
-      });
-      vals.append(primary, dl);
+      vals.classList.add("camera-temperature-pair");
+      const current = document.createElement("div");
+      current.className = "primary-reading";
+      current.dataset.cameraTemperature = "";
+      current.textContent = format(s.temperature, 1, "°C");
+      const currentLabel = document.createElement("small");
+      currentLabel.textContent = "Current";
+      current.append(currentLabel);
+      const delta = document.createElement("div");
+      delta.className = "primary-reading";
+      delta.dataset.cameraDelta = "";
+      const difference = numeric2(s.temperature) && numeric2(s.temperatureSetPoint) ? Math.round((s.temperature - s.temperatureSetPoint) * 10) / 10 : null;
+      delta.textContent = difference === null ? "—" : `${difference > 0 ? "+" : ""}${Object.is(difference, -0) ? "0.0" : difference.toFixed(1)}°C`;
+      const deltaLabel = document.createElement("small");
+      deltaLabel.textContent = `Δ to ${format(s.temperatureSetPoint, 1, "°C")}`;
+      delta.append(deltaLabel);
+      vals.append(current, delta);
     } else if (key === "mount") {
       const dl = document.createElement("dl");
       dl.className = "compact-readings mount-readings";
@@ -31748,11 +32508,12 @@ function renderDashboard(states, live, session, now = Date.now()) {
     const t = states[name], v = t?.value;
     return live && v?.connected === true && t && now - Date.parse(t.observedAt) < 60000 && typeof v.temperature === "number" && Number.isFinite(v.temperature) ? v.temperature : undefined;
   };
-  renderSequence(value("sequence"), live, session, site?.timeZone ? site : undefined, { focuserTemperature: temperature("focuser"), weatherTemperature: temperature("weather") }, value("administration").profile?.id, states.sequence?.observedAt);
+  renderSequence(value("sequence"), live, session, site?.timeZone ? site : undefined, { focuserTemperature: temperature("focuser"), weatherTemperature: temperature("weather") }, value("administration").profile?.id, states.sequence?.observedAt, followActive);
+  updateNightTimelineClock(live, now);
   for (const item of value("sequence").nodes ?? []) {
     if (item.type !== "TimeCondition" && item.type !== "WaitForTime")
       continue;
-    const row = [...node("sequence-tree").querySelectorAll("[data-node-id]")].find((row2) => row2.dataset.nodeId === item.id);
+    const row = [...node("sequence-tree").querySelectorAll("[data-node-id]")].find((row) => row.dataset.nodeId === item.id);
     const detail = row?.querySelector(".sequence-detail");
     if (detail) {
       const previous = detail.querySelector(".sequence-countdown");
@@ -31771,8 +32532,10 @@ function renderDashboard(states, live, session, now = Date.now()) {
   const thumbnail = node("last-preview");
   const revision = `${session}:${preview.revision}`;
   if (typeof preview.jpeg === "string" && preview.jpeg) {
-    if (revision !== previewRevision) {
+    if (revision !== previewRevision || !img.getAttribute("src")) {
       previewRevision = revision;
+      img.dataset.autofocusPreview = String(value("autofocus").running === true);
+      img.dataset.darkAutofocus = "false";
       img.src = "data:image/jpeg;base64," + preview.jpeg;
       thumbnail.src = img.src;
     }
@@ -31780,6 +32543,9 @@ function renderDashboard(states, live, session, now = Date.now()) {
     thumbnail.hidden = false;
     node("image-empty").hidden = true;
   } else {
+    previewRevision = "";
+    img.dataset.autofocusPreview = "false";
+    img.dataset.darkAutofocus = "false";
     img.hidden = true;
     thumbnail.hidden = true;
     thumbnail.removeAttribute("src");
@@ -31795,8 +32561,10 @@ function renderDashboard(states, live, session, now = Date.now()) {
     "image-fullscreen"
   ])
     node(id).disabled = !preview.jpeg;
-  text("image-caption", image.filename ? `${image.filename}${live ? "" : " · cached"}` : "No image received in this plugin session");
-  text("image-dimensions", numeric2(image.width) && numeric2(image.height) ? `${image.width} × ${image.height}` : "—");
+  const focusPreview = img.dataset.autofocusPreview === "true" && !!preview.jpeg;
+  img.dataset.previewCaption = preview.jpeg ? focusPreview ? "Autofocus preview" : image.filename ? `${image.filename}${live ? "" : " · cached"}` : "Prepared image preview" : document.body.classList.contains("replay-mode") ? "No recorded image at this time" : "No image received in this plugin session";
+  updatePreviewTreatment();
+  text("image-dimensions", numeric2(preview.width) && numeric2(preview.height) ? `${preview.width} × ${preview.height}` : numeric2(image.width) && numeric2(image.height) ? `${image.width} × ${image.height}` : "—");
   const download = node("image-download");
   download.hidden = !live || typeof image.id !== "string";
   if (typeof image.id === "string") {
@@ -31873,8 +32641,8 @@ function renderRoofStatus(states, live) {
     node("connection").after(badge);
   }
   const safety = states.safety?.value;
-  const known2 = live && safety?.connected === true && typeof safety.isSafe === "boolean";
-  const state = known2 ? safety.isSafe ? "open" : "closed" : "unknown";
+  const known = live && safety?.connected === true && typeof safety.isSafe === "boolean";
+  const state = known ? safety.isSafe ? "open" : "closed" : "unknown";
   const label = "Roof " + state;
   if (badge.textContent !== label)
     badge.textContent = label;
@@ -31904,7 +32672,8 @@ function mountDevicePanels(api) {
   try {
     storage = window.localStorage;
   } catch {}
-  const history2 = new ThermalHistory(storage);
+  const liveHistory = new ThermalHistory(storage);
+  let replayHistory = new ThermalHistory, history2 = liveHistory, lastReplayTime = 0;
   let mountCamera = { ...defaultMountCamera };
   let selected = "", context = "", chartStamp = "", panelShape = "";
   let invalidated = false;
@@ -31970,8 +32739,8 @@ function mountDevicePanels(api) {
       api.run(selected, state().connected === true ? "disconnect" : "connect");
   };
   el2(dialog, "connection-action").onclick = connect;
-  function metric(label, key, unit2 = "") {
-    return `<div class="device-metric"><small>${label}</small><strong data-reading="${key}" data-unit="${unit2}">—</strong></div>`;
+  function metric(label, key, unit = "") {
+    return `<div class="device-metric"><small>${label}</small><strong data-reading="${key}" data-unit="${unit}">—</strong></div>`;
   }
   function button(label, action, params = {}, cls = "") {
     const b = document.createElement("button");
@@ -31988,13 +32757,13 @@ function mountDevicePanels(api) {
       box.append(button(label, action, params));
     target.append(box);
   }
-  function slider(label, min, max, value, unit2, applyLabel, action, param, step = 1) {
+  function slider(label, min, max, value, unit, applyLabel, action, param, step = 1) {
     const box = document.createElement("section");
     box.className = "device-slider";
-    box.innerHTML = `<label>${label}<output>${format(value, step < 1 ? 1 : 0, unit2)}</output></label><input aria-label="${safe(label)}" type="range" min="${min}" max="${max}" value="${Math.min(max, Math.max(min, value))}" step="${step}"><div class="range-ends"><span>${format(min, 0, unit2)}</span><span>${format(max, 0, unit2)}</span></div>`;
+    box.innerHTML = `<label>${label}<output>${format(value, step < 1 ? 1 : 0, unit)}</output></label><input aria-label="${safe(label)}" type="range" min="${min}" max="${max}" value="${Math.min(max, Math.max(min, value))}" step="${step}"><div class="range-ends"><span>${format(min, 0, unit)}</span><span>${format(max, 0, unit)}</span></div>`;
     const input = box.querySelector("input"), out = box.querySelector("output");
     input.oninput = () => {
-      out.value = format(Number(input.value), step < 1 ? 1 : 0, unit2);
+      out.value = format(Number(input.value), step < 1 ? 1 : 0, unit);
     };
     const apply = button(applyLabel, action);
     apply.onclick = () => api.run(selected, action, {
@@ -32006,6 +32775,8 @@ function mountDevicePanels(api) {
     return box;
   }
   function open(key, keyboard = false) {
+    if (api.replay?.())
+      return;
     if (!keyboard && !dialog.open && document.activeElement instanceof HTMLElement)
       document.activeElement.blur();
     selected = key;
@@ -32089,8 +32860,8 @@ function mountDevicePanels(api) {
       const redraw = () => {
         updateMountView(view, state("mount"), api.live(), false, mountCamera);
       };
-      const orbit = (az, el3) => {
-        mountCamera = { azimuth: (az % 360 + 360) % 360, elevation: Math.max(5, Math.min(80, el3)) };
+      const orbit = (az, el) => {
+        mountCamera = { azimuth: (az % 360 + 360) % 360, elevation: Math.max(5, Math.min(80, el)) };
         redraw();
       };
       body.querySelector('[aria-label="Reset telescope view"]').onclick = () => {
@@ -32217,10 +32988,10 @@ function mountDevicePanels(api) {
       return `<line x1="40" x2="460" y1="${yy}" y2="${yy}"/><text x="33" y="${yy + 4}" text-anchor="end">${v.toFixed(0)}°</text><text x="466" y="${yy + 4}">${100 - i * 25}%</text>`;
     }).join("");
     const clocks = mini ? "" : `<text x="40" y="169">${new Date(start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</text><text x="460" y="169" text-anchor="end">${new Date(end).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</text><text x="40" y="12">°C</text><text x="460" y="12" text-anchor="end">%</text>`;
-    container.innerHTML = `<svg viewBox="0 0 510 180" role="img" aria-label="Camera temperature and cooler power over time">${labels}<path class="thermal-temperature" d="${thermalPaths(a, "temperature", x, y)}"/><path class="thermal-power" d="${thermalPaths(a, "power", x, p)}"/>${a.length === 1 && a[0].temperature !== null ? `<circle cx="${x(a[0].at)}" cy="${y(a[0].temperature)}" r="3"/>` : ""}${clocks}${valid.length ? "" : '<text x="255" y="90" text-anchor="middle">Waiting for temperature telemetry</text>'}</svg>`;
+    container.innerHTML = `<svg viewBox="0 0 510 180" role="img" aria-label="Camera temperature and cooler power over time">${labels}<path class="thermal-temperature" d="${thermalPaths(a, "temperature", x, y)}"/><path class="thermal-power" d="${thermalPaths(a, "power", x, p)}"/>${a.filter((s, i) => s.temperature !== null && (i === 0 || a[i - 1].temperature === null || s.at - a[i - 1].at > 15000) && (i === a.length - 1 || a[i + 1].temperature === null || a[i + 1].at - s.at > 15000)).map((s) => `<circle cx="${x(s.at)}" cy="${y(s.temperature)}" r="2"/>`).join("")}${clocks}${valid.length ? "" : '<text x="255" y="90" text-anchor="middle">' + (api.replay?.() ? "No recorded temperature samples" : "Waiting for temperature telemetry") + "</text>"}</svg>`;
   }
   function update() {
-    const states = api.states(), liveNow = api.live(), reasonNow = selected ? api.reason(selected, state().connected === true ? "disconnect" : "connect") : "";
+    const states = api.states(), liveNow = api.live(), recorded = api.replay?.() === true, readingsNow = api.readings?.() ?? liveNow, now = api.clock?.() ?? Date.now(), reasonNow = selected ? api.reason(selected, state().connected === true ? "disconnect" : "connect") : "";
     const mount = states.mount?.value ?? {}, slewing = liveNow && mount.connected === true && mount.slewing === true;
     cardStop.hidden = !slewing;
     mountStop.hidden = !(slewing && selected === "mount");
@@ -32235,22 +33006,52 @@ function mountDevicePanels(api) {
     lastLive = liveNow;
     lastSelected = selected;
     lastReason = reasonNow;
+    if (recorded && now < lastReplayTime)
+      replayHistory = new ThermalHistory;
+    history2 = recorded ? replayHistory : liveHistory;
+    lastReplayTime = recorded ? now : 0;
+    for (const key of primary) {
+      const heading = document.querySelector("#equipment-" + key + " .equipment-title");
+      if (heading) {
+        heading.tabIndex = recorded ? -1 : 0;
+        heading.role = recorded ? "group" : "button";
+        heading.setAttribute("aria-label", devices[key][0] + (recorded ? " recorded state" : " controls"));
+      }
+    }
     const camera = states.camera?.value ?? {}, id = (states.devices?.value.items ?? []).find((d) => d.device === "camera" && d.selected)?.id ?? camera.name ?? "";
-    if (api.session() && id)
-      history2.receive(JSON.stringify([api.session(), states.administration?.value.profile?.id ?? "", id]), Date.parse(states.diagnostics?.observedAt ?? ""), api.live() && camera.connected === true, camera.temperature, camera.coolerPower);
+    const archivedSamples = recorded ? api.thermalSamples?.() : undefined;
+    if (archivedSamples)
+      history2.samples = archivedSamples.filter((s) => s.at <= now && s.at >= now - 3600000);
+    if (!archivedSamples && api.session() && id)
+      history2.receive(JSON.stringify([api.session(), states.administration?.value.profile?.id ?? "", id]), Date.parse((recorded ? states.camera?.observedAt : states.diagnostics?.observedAt) ?? ""), readingsNow && camera.connected === true, camera.temperature, camera.coolerPower, now);
     const mini = document.querySelector("#equipment-camera .equipment-values");
+    const cameraCard = document.getElementById("equipment-camera");
+    cameraCard.classList.toggle("has-recorded-thermal", recorded);
+    let cardChart = cameraCard.querySelector("[data-camera-thermal-chart]");
     if (mini) {
-      mini.classList.add("camera-thermal-mini");
-      thermal(mini, true);
-      const caption = document.createElement("div");
-      caption.className = "thermal-mini-caption";
-      caption.textContent = api.live() && camera.connected === true ? `${format(camera.temperature, 1, "°C")} · ${format(camera.coolerPower, 0, "%")}` : "Camera offline";
-      mini.append(caption);
+      mini.classList.remove("camera-thermal-mini");
+      if (!cardChart) {
+        cardChart = document.createElement("div");
+        cardChart.dataset.cameraThermalChart = "";
+        cardChart.className = "camera-thermal-mini recorded-camera-chart";
+        mini.after(cardChart);
+      }
+      cardChart.toggleAttribute("data-recorded-camera-chart", recorded);
+      thermal(cardChart, true);
+      const legend = document.createElement("div");
+      legend.className = "thermal-mini-caption";
+      legend.innerHTML = '<span class="recorded-temperature-key">Temperature</span> · <span class="recorded-power-key">Cooler %</span>';
+      cardChart.append(legend);
     }
     const mountMini = document.querySelector("#equipment-mount .equipment-values");
     if (mountMini) {
       mountMini.classList.add("mount-mini");
-      updateMountView(mountMini, states.mount?.value ?? {}, liveNow, true);
+      updateMountView(mountMini, states.mount?.value ?? {}, recorded ? readingsNow || mount.connected === true : liveNow, true);
+      const caption = mountMini.querySelector(".mount-motion");
+      if (caption) {
+        const raw = (caption.textContent ?? "").replace(/^(Recorded|Last recorded) · /, "");
+        caption.textContent = recorded ? (readingsNow ? "Recorded · " : "Last recorded · ") + raw : raw;
+      }
     }
     if (!selected)
       return;
@@ -32275,8 +33076,8 @@ function mountDevicePanels(api) {
     connection.disabled = invalidated || !!api.reason(selected, action);
     connection.classList.toggle("is-connect", action === "connect");
     connection.title = invalidated ? "Device changed. Reopen controls." : api.reason(selected, action);
-    for (const node2 of body.querySelectorAll("[data-reading]"))
-      node2.textContent = connected ? format(s[node2.dataset.reading], node2.dataset.reading === "rightAscension" ? 4 : node2.dataset.reading === "declination" ? 3 : ["coolerPower", "position", "brightness"].includes(node2.dataset.reading) ? 0 : 1, node2.dataset.unit) : "—";
+    for (const node of body.querySelectorAll("[data-reading]"))
+      node.textContent = connected ? format(s[node.dataset.reading], node.dataset.reading === "rightAscension" ? 4 : node.dataset.reading === "declination" ? 3 : ["coolerPower", "position", "brightness"].includes(node.dataset.reading) ? 0 : 1, node.dataset.unit) : "—";
     for (const b of body.querySelectorAll("[data-action]")) {
       const a = b.dataset.action;
       let why = invalidated ? "Device changed. Reopen controls." : api.reason(selected, a);
@@ -32334,13 +33135,13 @@ function mountDevicePanels(api) {
       roof.classList.toggle("is-safe", connected && s.isSafe === true);
       roof.innerHTML = `<span aria-hidden="true">⌂</span><strong>${!connected ? "Unknown" : s.isSafe === true ? "Safe" : s.isSafe === false ? "Unsafe" : "Unknown"}</strong>`;
     }
-    for (const [field3, id2] of [
+    for (const [field, id] of [
       ["guide-graph", "guide-chart"],
       ["focus-graph", "focus-chart"]
     ]) {
-      const target = body.querySelector(`[data-field=${field3}]`);
+      const target = body.querySelector(`[data-field=${field}]`);
       if (target) {
-        const original = document.getElementById(id2);
+        const original = document.getElementById(id);
         target.replaceChildren();
         if (original)
           target.append(original.cloneNode(true));
@@ -32370,9 +33171,8 @@ document.getElementById("dashboard-lock")?.addEventListener("click", async () =>
 var liveCurrent = null;
 var replayFrame = null;
 var replayMode = false;
+var replayFollow = true;
 var current = null;
-var websocket = null;
-var retry = 1000;
 var currentSession = "";
 var lastMetric = "";
 var socketReady = false;
@@ -32380,9 +33180,9 @@ var pending = new Map;
 var pendingActions = new Map;
 var samples = [];
 var write = (id, value) => {
-  const text2 = value == null ? "—" : String(value);
-  if (el3(id).textContent !== text2)
-    el3(id).textContent = text2;
+  const text = value == null ? "—" : String(value);
+  if (el3(id).textContent !== text)
+    el3(id).textContent = text;
 };
 var clockFormat = new Intl.DateTimeFormat([], {
   hour: "2-digit",
@@ -32424,13 +33224,27 @@ async function request(path, body, signal) {
   return data;
 }
 mountDashboard();
+var updateBulkConnections = mountBulkConnections({
+  states: () => current?.snapshot?.states ?? {},
+  session: () => current?.snapshot?.sessionId ?? "",
+  replay: () => replayMode,
+  reason: (device, action) => commandReason(device, action, true),
+  send: (device, action, id) => send(device, action, id, undefined, true, true),
+  busy: (value) => {
+    bulkConnectionsRunning = value;
+  },
+  notice
+});
 var tools = el3("tools-dialog");
 el3("open-tools").onclick = () => tools.showModal();
 el3("close-tools").onclick = () => tools.close();
 function operations() {
   return topic("operations").items ?? [];
 }
-function commandReason(device, action) {
+var bulkConnectionsRunning = false;
+function commandReason(device, action, withinBulk = false) {
+  if (bulkConnectionsRunning && !withinBulk)
+    return "Equipment connections are being updated.";
   if (replayMode)
     return "Replay is read-only. Return to Live to control equipment.";
   if (preview)
@@ -32542,8 +33356,8 @@ el3("confirm-send").onclick = () => {
   if (callback)
     callback();
 };
-async function send(device, action, deviceId, parameters, rejectKnown = false) {
-  const reason = commandReason(device, action);
+async function send(device, action, deviceId, parameters, rejectKnown = false, withinBulk = false) {
+  const reason = commandReason(device, action, withinBulk);
   if (reason) {
     notice(reason);
     return;
@@ -32561,14 +33375,14 @@ async function send(device, action, deviceId, parameters, rejectKnown = false) {
       deviceId,
       parameters
     });
-  } catch (error2) {
-    if (error2 instanceof RequestError && [400, 401, 403, 404, 409, 413, 422, 429].includes(error2.status)) {
+  } catch (error) {
+    if (error instanceof RequestError && [400, 401, 403, 404, 409, 413, 422, 429].includes(error.status)) {
       pending.delete(device);
       pendingActions.delete(device);
     }
-    notice(`${error2 instanceof Error ? error2.message : "Command outcome unknown."} Request ${requestId}. Check Operations before retrying.`);
-    if (rejectKnown && error2 instanceof RequestError && [400, 401, 403, 404, 409, 413, 422, 429].includes(error2.status))
-      throw error2;
+    notice(`${error instanceof Error ? error.message : "Command outcome unknown."} Request ${requestId}. Check Operations before retrying.`);
+    if (rejectKnown && error instanceof RequestError && [400, 401, 403, 404, 409, 413, 422, 429].includes(error.status))
+      throw error;
   }
   render();
   return requestId;
@@ -32640,9 +33454,13 @@ function renderActions() {
     button.title = reason;
   }
   const startReason = commandReason("sequence", "start");
-  write("sequence-action-hint", replayMode ? "Replay · controls disabled" : preview ? "Preview · controls disabled" : topic("application").sequenceRunning ? "Sequence running" : startReason === "Acquisition or another command is active." ? "" : startReason);
+  write("sequence-action-hint", replayMode ? "" : preview ? "Preview · controls disabled" : topic("application").sequenceRunning ? "Sequence running" : startReason === "Acquisition or another command is active." ? "" : startReason);
 }
 var updateDevicePanels = mountDevicePanels({
+  thermalSamples: () => replayMode ? replayFrame?.cameraThermal : undefined,
+  replay: () => replayMode,
+  readings: () => replayMode ? !!replayFrame && !replayFrame.gap : !preview && fresh(),
+  clock: () => replayMode && replayFrame ? replayFrame.at : Date.now(),
   states: () => current?.snapshot?.states ?? {},
   session: () => current?.snapshot?.sessionId ?? "",
   live: () => !preview && fresh(),
@@ -32688,6 +33506,7 @@ function updateClock() {
   updateExposureClock(readingsAvailable, replayMode ? replayFrame?.at : undefined);
   updateSequenceClocks(readingsAvailable, replayMode ? replayFrame?.at : undefined);
   renderActions();
+  updateBulkConnections();
   updateDevicePanels();
   updateSequenceEditor();
   updateSequenceLibrary();
@@ -32696,10 +33515,12 @@ setInterval(updateClock, 250);
 document.addEventListener("visibilitychange", updateClock);
 function render() {
   const states = current?.snapshot?.states ?? {}, live = replayMode ? !!replayFrame && !replayFrame.gap : preview || fresh();
-  renderDashboard(states, live, current?.snapshot?.sessionId ?? "", replayMode ? replayFrame?.at : undefined);
+  renderDashboard(states, live, current?.snapshot?.sessionId ?? "", replayMode ? replayFrame?.at : undefined, !replayMode || replayFollow);
   const empty = el3("image-empty");
   empty.querySelector("strong").textContent = replayMode ? "No recorded image" : "Waiting for an image";
   empty.querySelector("span").textContent = replayMode ? "No image preview was recorded at this time." : "The next image preview will appear here.";
+  if (replayMode)
+    write("sequence-freshness", replayFrame?.gap ? "Recording gap" : "Recorded");
   el3("latest-preview").alt = replayMode ? "Recorded image preview" : "Latest image from N.I.N.A.";
   const app = topic("application"), diagnostic = topic("diagnostics");
   write("environment", preview ? "Illustrative preview" : app.environment === "simulation" ? "Simulation" : app.environment === "equipment" ? "Equipment" : "Environment unknown");
@@ -32743,8 +33564,8 @@ function render() {
   updateClock();
 }
 function renderPlot() {
-  const plot2 = el3("memory-plot"), width = Math.max(350, plot2.clientWidth);
-  plot2.setAttribute("viewBox", `0 0 ${width} 180`);
+  const plot = el3("memory-plot"), width = Math.max(350, plot.clientWidth);
+  plot.setAttribute("viewBox", `0 0 ${width} 180`);
   el3("plot-empty").setAttribute("x", String(width / 2));
   el3("plot-empty").setAttribute("visibility", samples.length ? "hidden" : "visible");
   const max = Math.max(1e8, ...samples.map((x) => x.bytes)) * 1.15, grid = el3("plot-grid");
@@ -32770,26 +33591,33 @@ function renderPlot() {
   write("plot-end", time(last));
   el3("memory-line").setAttribute("d", samples.map((s, i) => `${i ? "L" : "M"}${40 + (Date.parse(s.at) - Date.parse(first)) / Math.max(1, Date.parse(last) - Date.parse(first)) * (width - 50)},${160 - s.bytes / max * 152}`).join(" "));
 }
-function connect() {
-  const socket = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${gatewayBase}/socket`);
-  websocket = socket;
-  socket.onopen = () => {
-    socketReady = true;
-    retry = 1000;
-  };
-  socket.onmessage = (event) => {
-    if (socket !== websocket)
-      return;
+var telemetryConnection = createTelemetryConnection({
+  url: () => `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${gatewayBase}/socket`,
+  renew: () => request(gatewayBase ? "/auth/dashboard-session" : "/auth/local-session", {}, AbortSignal.timeout(1e4)),
+  state(open) {
+    socketReady = open;
+    if (!open) {
+      if (liveCurrent)
+        liveCurrent.bridge.connected = false;
+      if (!replayMode && current)
+        current.bridge.connected = false;
+      render();
+    }
+  },
+  receive(data) {
     try {
-      current = JSON.parse(String(event.data));
+      const next = JSON.parse(data);
+      if (!next || typeof next.bridge?.connected !== "boolean" || !("snapshot" in next))
+        return false;
+      current = next;
     } catch {
       notice("An invalid telemetry message was ignored.");
-      return;
+      return false;
     }
     liveCurrent = current;
     if (replayMode) {
       current = replayFrame ? { bridge: { connected: false }, snapshot: replayFrame.snapshot } : null;
-      return;
+      return true;
     }
     if (current.snapshot && current.snapshot.sessionId !== currentSession) {
       if (currentSession && pending.size)
@@ -32801,22 +33629,28 @@ function connect() {
       lastMetric = "";
     }
     render();
-  };
-  socket.onclose = () => {
-    if (socket !== websocket)
-      return;
-    socketReady = false;
-    if (liveCurrent)
-      liveCurrent.bridge.connected = false;
-    if (!replayMode && current)
-      current.bridge.connected = false;
-    render();
-    setTimeout(connect, retry);
-    if (gatewayBase)
-      request("/auth/dashboard-session", {}).catch(() => {});
-    retry = Math.min(1e4, retry * 2);
-  };
+    return true;
+  }
+});
+function connect() {
+  telemetryConnection.start();
 }
+setInterval(() => {
+  if (!preview)
+    telemetryConnection.check();
+}, 1000);
+document.addEventListener("visibilitychange", () => {
+  if (!preview && document.visibilityState === "visible")
+    telemetryConnection.resume();
+});
+window.addEventListener("focus", () => {
+  if (!preview)
+    telemetryConnection.resume();
+});
+window.addEventListener("pageshow", (event) => {
+  if (!preview && event.persisted)
+    telemetryConnection.resume();
+});
 async function start() {
   try {
     if (preview) {
@@ -32851,6 +33685,10 @@ async function start() {
   }
 }
 mountReplay({
+  follow(enabled) {
+    replayFollow = enabled;
+    render();
+  },
   read: (path, signal) => request(path, undefined, signal),
   mode(active) {
     replayMode = active;

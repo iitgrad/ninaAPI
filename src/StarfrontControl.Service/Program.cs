@@ -20,6 +20,7 @@ builder.Logging.SetMinimumLevel(LogLevel.Warning);
 builder.Services.AddSingleton(config);
 builder.Services.AddSingleton<SurveyFraming>();
 builder.Services.AddSingleton<RecordingReplay>();
+builder.Services.AddHostedService<ReplayIndexWarmup>();
 builder.Services.AddSingleton<PushNotifications>();
 builder.Services.AddHostedService(provider => provider.GetRequiredService<PushNotifications>());
 builder.Services.AddSingleton<BridgeConnection>();
@@ -87,7 +88,7 @@ app.MapGet("/api/v1/framing/image", async (HttpContext context, SurveyFraming su
         var image=await survey.Image(field,context.RequestAborted);
         if(image is null)return Results.StatusCode(429);
         context.Response.Headers.CacheControl="private, max-age=86400";
-        return Results.Bytes(image,"image/jpeg");
+        return Results.Bytes(image,"image/svg+xml");
     }catch(Exception e) when(e is HttpRequestException or IOException or OperationCanceledException) {
         return Results.StatusCode(503);
     }

@@ -25,6 +25,7 @@ export function visibility(ra:number,dec:number,site:Site,day:string):Visibility
  if(cache.size>=32)cache.delete(cache.keys().next().value!);cache.set(key,value);return value;
 }
 const svgNS='http://www.w3.org/2000/svg';
+let visibilityGraphId=0;
 function svg(tag:string,attrs:Record<string,string|number>,text?:string){const e=document.createElementNS(svgNS,tag);for(const [k,v] of Object.entries(attrs))e.setAttribute(k,String(v));if(text)e.textContent=text;return e;}
 export function renderVisibility(host:HTMLElement,ra:number,dec:number,site:Site,day:string,width=1000,now=Date.now()){
  const compact=width<520;
@@ -32,15 +33,19 @@ export function renderVisibility(host:HTMLElement,ra:number,dec:number,site:Site
  const v=visibility(ra,dec,site,day),W=Math.max(180,Math.round(width)),H=width<360?140:compact?180:230,L=34,R=20,T=compact?28:42,B=28,x=(t:number)=>L+(t-v.start)/(v.end-v.start)*(W-L-R),y=(a:number)=>T+(90-a)/90*(H-T-B);
  const graph=svg('svg',{viewBox:`0 0 ${W} ${H}`,width:W,height:H,role:'img','aria-label':`Target altitude and twilight on ${day} at ${site.name||'profile observing site'}`});
  const clock=(t:number)=>new Intl.DateTimeFormat(undefined,{timeZone:site.timeZone,hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(t);
- for(let i=0;i<v.samples.length-1;i++){const p=v.samples[i],sun=p.sun;graph.append(svg('rect',{x:x(p.time),y:T,width:x(v.samples[i+1].time)-x(p.time)+.5,height:H-T-B,fill:sun>-6?'#536477':sun>-12?'#34465e':sun>-18?'#222f49':'#111e30'}));}
- for(const a of [0,30,60,90]){graph.append(svg('line',{x1:L,x2:W-R,y1:y(a),y2:y(a),stroke:'#587086','stroke-opacity':'.4','stroke-dasharray':a===30?'4 5':'0'}),svg('text',{x:L-7,y:y(a)+4,'text-anchor':'end',fill:'#8da6bb','font-size':12},a+'°'));}
- for(let t=v.start;t<=v.end;t+=(compact?6:W<850?3:2)*3600000)graph.append(svg('text',{x:x(t),y:H-7,fill:'#9db4c8','font-size':11,'text-anchor':'middle'},clock(t)));
- const d=v.samples.map((p,i)=>(i?'L':'M')+x(p.time).toFixed(1)+','+y(Math.max(0,p.altitude)).toFixed(1)).join(' ');
- graph.append(svg('path',{d,fill:'none',stroke:'#68daca','stroke-width':3,'stroke-linejoin':'round'}));
+ for(let i=0;i<v.samples.length-1;i++){const p=v.samples[i],sun=p.sun;graph.append(svg('rect',{x:x(p.time),y:T,width:x(v.samples[i+1].time)-x(p.time)+.5,height:H-T-B,fill:sun>-6?'var(--sky-day, #536477)':sun>-12?'var(--sky-nautical, #34465e)':sun>-18?'var(--sky-astronomical, #222f49)':'var(--sky-night, #111e30)'}));}
+ for(const a of [0,30,60,90]){graph.append(svg('line',{x1:L,x2:W-R,y1:y(a),y2:y(a),stroke:'var(--chart-grid, #587086)','stroke-opacity':'.4','stroke-dasharray':a===30?'4 5':'0'}),svg('text',{x:L-7,y:y(a)+4,'text-anchor':'end',fill:'var(--muted)','font-size':12},a+'°'));}
+ for(let t=v.start;t<=v.end;t+=(compact?6:W<850?3:2)*3600000)graph.append(svg('text',{x:x(t),y:H-7,fill:'var(--muted)','font-size':11,'text-anchor':'middle'},clock(t)));
+ // Preserve the real curve below the horizon and clip it to the plot. Clamping
+ // negative samples to zero draws a false flat segment along the horizon.
+ const clipId='target-altitude-clip-'+(++visibilityGraphId),defs=svg('defs',{}),clip=svg('clipPath',{id:clipId,clipPathUnits:'userSpaceOnUse'});
+ clip.append(svg('rect',{x:L,y:T,width:W-L-R,height:H-T-B}));defs.append(clip);graph.append(defs);
+ const d=v.samples.map((p,i)=>(i?'L':'M')+x(p.time).toFixed(1)+','+y(p.altitude).toFixed(1)).join(' ');
+ graph.append(svg('path',{d,fill:'none',stroke:'var(--accent)','stroke-width':3,'stroke-linejoin':'round','clip-path':`url(#${clipId})`,'data-altitude-curve':'1'}));
  const events=[{time:v.rise,label:'Rise'},{time:v.transit,label:`Meridian ${v.peak.toFixed(0)}°`},{time:v.set,label:'Set'}];
  const labels:{x:number;y:number}[]=[];
- for(const event of events)if(event.time!=null&&event.time>=v.start&&event.time<=v.end){const px=x(event.time);graph.append(svg('line',{x1:px,x2:px,y1:T,y2:H-B,stroke:'#78b9ce','stroke-dasharray':'3 5','stroke-opacity':'.6'}));if(!compact){const lx=Math.min(W-85,Math.max(85,px)),ly=labels.some(label=>Math.abs(label.x-lx)<130&&label.y===16)?30:16;labels.push({x:lx,y:ly});graph.append(svg('text',{x:lx,y:ly,'text-anchor':'middle',fill:'#b4d8e1','font-size':11},event.label+' '+clock(event.time)));}}
- graph.append(svg('line',{'data-observing-clock':'1','data-start':v.start,'data-end':v.end,'data-width':W,x1:x(now),x2:x(now),y1:T,y2:H-B,stroke:'#f3c978','stroke-width':1.5,visibility:now>=v.start&&now<=v.end?'visible':'hidden'}));
+ for(const event of events)if(event.time!=null&&event.time>=v.start&&event.time<=v.end){const px=x(event.time);graph.append(svg('line',{x1:px,x2:px,y1:T,y2:H-B,stroke:'var(--chart-ra, #78b9ce)','stroke-dasharray':'3 5','stroke-opacity':'.6'}));if(!compact){const lx=Math.min(W-85,Math.max(85,px)),ly=labels.some(label=>Math.abs(label.x-lx)<130&&label.y===16)?30:16;labels.push({x:lx,y:ly});graph.append(svg('text',{x:lx,y:ly,'text-anchor':'middle',fill:'var(--text)','font-size':11},event.label+' '+clock(event.time)));}}
+ graph.append(svg('line',{'data-observing-clock':'1','data-start':v.start,'data-end':v.end,'data-width':W,x1:x(now),x2:x(now),y1:T,y2:H-B,stroke:'var(--amber)','stroke-width':1.5,visibility:now>=v.start&&now<=v.end?'visible':'hidden'}));
  host.replaceChildren(graph);
  const eventLegend=document.createElement('div');eventLegend.className='target-events';
  for(const event of events){const span=document.createElement('span');span.textContent=event.label+' '+(event.time==null?'—':clock(event.time));eventLegend.append(span);}host.append(eventLegend);

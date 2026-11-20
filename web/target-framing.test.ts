@@ -6,3 +6,16 @@ test('camera framing uses sequence coordinates and PA with a protected same-orig
  expect(url.pathname).toBe('/dashboard/api/v1/framing/image');expect(Number(url.searchParams.get('ra'))).toBeCloseTo(324.7395,5);expect(url.searchParams.get('rotation')).toBe('90');expect(url.searchParams.get('width')).toBe('4.6');expect(url.searchParams.get('height')).toBe('3.07');
 });
 test('invalid coordinates are unavailable and RA24 wraps to zero',()=>{expect(framingUrl(NaN,0,0,rig)).toBeNull();expect(framingUrl(0,91,0,rig)).toBeNull();expect(new URL(framingUrl(24,0,-90,rig)!,'https://localhost').searchParams.get('rotation')).toBe('270');expect(new URL(framingUrl(24,0,0,rig)!,'https://localhost').searchParams.get('ra')).toBe('0');});
+
+import {framingResponse} from './target-framing';
+test('framing fetch rejects provider failure and invalid content instead of leaving loading pending',async()=>{
+ const saved=globalThis.fetch;
+ try{
+  globalThis.fetch=(async()=>new Response('offline',{status:503})) as typeof fetch;
+  await expect(framingResponse('/fixture',new AbortController().signal)).rejects.toThrow('Survey unavailable');
+  globalThis.fetch=(async()=>new Response('<html>error</html>',{headers:{'Content-Type':'text/html'}})) as typeof fetch;
+  await expect(framingResponse('/fixture',new AbortController().signal)).rejects.toThrow('Invalid survey image');
+  globalThis.fetch=(async()=>new Response('<svg/>',{headers:{'Content-Type':'image/svg+xml'}})) as typeof fetch;
+  expect((await framingResponse('/fixture',new AbortController().signal)).type).toBe('image/svg+xml');
+ }finally{globalThis.fetch=saved;}
+});

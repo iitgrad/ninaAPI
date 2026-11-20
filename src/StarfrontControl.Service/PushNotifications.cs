@@ -28,7 +28,7 @@ public sealed class PushNotifications : BackgroundService
     private readonly Dictionary<string, DateTimeOffset> lastTests = [];
     private readonly List<PushDevice> devices;
     private readonly List<StoredNotice> history;
-    private readonly Dictionary<string, (byte[] Bytes, string Key, DateTimeOffset Expires)> media = [];
+    private readonly NotificationMediaStore media;
     private byte[]? latestPreview;
     private DateTimeOffset previewAt;
     private bool baseline = true;
@@ -46,6 +46,7 @@ public sealed class PushNotifications : BackgroundService
         devices = Load<List<PushDevice>>("devices.json") ?? [];
         history = Load<List<StoredNotice>>("history.json") ?? [];
         history = history.TakeLast(200).ToList();
+        media = new NotificationMediaStore(Path.Combine(root, "Media"));
     }
     private T? Load<T>(string name) => File.Exists(Path.Combine(root, name)) ? JsonSerializer.Deserialize<T>(File.ReadAllText(Path.Combine(root, name)), Json) : default;
     private void Save(string name, object value)
@@ -90,7 +91,11 @@ public sealed class PushNotifications : BackgroundService
     }
     public object History(PushDevice device)
     {
-        lock (gate) return history.TakeLast(100).Reverse().Select(h => new { h.Notice.Id, h.Notice.Kind, h.Notice.Title, h.Notice.Body, h.Notice.At, h.Notice.Target, delivery = h.Deliveries.GetValueOrDefault(device.Id), previewUrl = media.TryGetValue(h.Notice.Id, out var item) && item.Expires > DateTimeOffset.UtcNow && Configured ? Configuration.PublicOrigin.TrimEnd('/') + "/mobile/notifications/media/" + h.Notice.Id + "?key=" + item.Key : null }).ToArray();
+        lock (gate) return history.TakeLast(100).Reverse().Select(h => new { h.Notice.Id, h.Notice.Kind,
+            Title = NotificationText.Repair(h.Notice.Title), Body = NotificationText.Repair(h.Notice.Body),
+            h.Notice.At, Target = h.Notice.Target is { } target ? NotificationText.Repair(target) : null,
+            delivery = h.Deliveries.GetValueOrDefault(device.Id), previewUrl = media.Key(h.Notice.Id) is { } key && Configured
+                ? Configuration.PublicOrigin.TrimEnd('/') + "/mobile/notifications/media/" + h.Notice.Id + "?key=" + key : null }).ToArray();
     }
     public void Receipt(PushDevice device, string id, bool opened)
     {
@@ -104,7 +109,7 @@ public sealed class PushNotifications : BackgroundService
     public void Remove(PushDevice device) { lock (gate) { devices.RemoveAll(d => d.Id == device.Id); Save("devices.json", devices); } }
     public byte[]? Media(string id, string key)
     {
-        lock (gate) return media.TryGetValue(id, out var item) && item.Expires > DateTimeOffset.UtcNow && Same(item.Key, key) ? item.Bytes : null;
+        return media.Read(id, key);
     }
     public void Observe(string frame) => inbox.Writer.TryWrite((frame, null));
     public bool Test(PushDevice device)
@@ -147,18 +152,17 @@ public sealed class PushNotifications : BackgroundService
     }
     private async Task Emit(ObservatoryNotice notice, CancellationToken stop)
     {
+        notice = notice with { Title = NotificationText.Repair(notice.Title), Body = NotificationText.Repair(notice.Body),
+            Target = notice.Target is { } target ? NotificationText.Repair(target) : null };
         PushDevice[] recipients; StoredNotice stored; string? imageUrl = null;
         lock (gate)
         {
             recipients = devices.Where(d => Wants(d, notice.Kind)).ToArray();
             if (notice.Kind == "step" && recipients.Length == 0) return;
             stored = new(notice, []); history.Add(stored); if (history.Count > 200) history.RemoveAt(0);
-            foreach (var key in media.Where(x => x.Value.Expires < DateTimeOffset.UtcNow).Select(x => x.Key).ToArray()) media.Remove(key);
             if (notice.AttachPreview && latestPreview is not null && DateTimeOffset.UtcNow - previewAt < TimeSpan.FromMinutes(5) && Configured)
             {
-                if (media.Count >= 32) media.Remove(media.Keys.First());
-                var key = Convert.ToHexString(RandomNumberGenerator.GetBytes(24));
-                media[notice.Id] = (latestPreview, key, DateTimeOffset.UtcNow.AddHours(2));
+                var key = media.Put(notice.Id, latestPreview);
                 imageUrl = Configuration.PublicOrigin.TrimEnd('/') + "/mobile/notifications/media/" + notice.Id + "?key=" + key;
             }
             foreach (var device in recipients) stored.Deliveries[device.Id] = new("pending", DateTimeOffset.UtcNow);
@@ -185,7 +189,7 @@ public sealed class PushNotifications : BackgroundService
                 var snapshot = frame.GetProperty("snapshot");
                 var preview = NotificationProjection.Topic(snapshot, "preview");
                 if (NotificationProjection.Text(preview, "jpeg") is { Length: <= 140000 } jpeg && snapshot.GetProperty("states").GetProperty("preview").TryGetProperty("observedAt", out var observed) && DateTimeOffset.TryParse(observed.GetString(), out var at) && at > previewAt)
-                { var bytes = Convert.FromBase64String(jpeg); if (bytes.Length <= 100000) { lock (gate) { latestPreview = bytes; previewAt = at; } } }
+                { var bytes = Convert.FromBase64String(jpeg); var notification = NotificationPreview.Render(bytes); lock (gate) { latestPreview = notification; previewAt = at; } }
                 var notices = projection.Observe(snapshot, baseline, Configured ? Configuration.ImageInterval : 5); baseline = false;
                 foreach (var notice in notices) await Emit(notice, stoppingToken);
             }

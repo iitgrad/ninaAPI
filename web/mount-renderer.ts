@@ -24,6 +24,7 @@ THE SOFTWARE.
 */
 import * as THREE from 'three';
 import {fitMountCamera} from './mount-camera';
+import {MountMotion} from './mount-motion';
 import rig from './assets/starfront-rig.json';
 import {mountView,defaultMountCamera,type MountState,type MountCamera} from './mount-view';
 
@@ -56,8 +57,13 @@ class MountRenderer{
  private scene=new THREE.Scene();
  private camera=new THREE.OrthographicCamera(-1.7,1.7,1.6,-1.6,.1,30);
  private optics=new THREE.Group();
+ private motion=new MountMotion();
+ private pointingKnown=false;
+ private reducedMotion=window.matchMedia('(prefers-reduced-motion: reduce)');
  private materials:THREE.Material[]=[];
  private textures:THREE.Texture[]=[];
+ private compassLabels:{canvas:HTMLCanvasElement;texture:THREE.CanvasTexture;label:string}[]=[];
+ private theme=window.matchMedia("(prefers-color-scheme: light)");
  private localGeometry:THREE.BufferGeometry[]=[];
  private resize:ResizeObserver;
  private frame=0;
@@ -99,15 +105,21 @@ class MountRenderer{
   const compass=new THREE.Group();this.scene.add(compass);
   for(const [name,x,z]of [['N',0,-1.36],['E',1.36,0],['S',0,1.36],['W',-1.36,0]] as const){
    const c=document.createElement('canvas');c.width=64;c.height=64;const ctx=c.getContext('2d')!;ctx.font='500 42px system-ui';ctx.fillStyle='#9bbac9';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(name,32,32);
-   const texture=new THREE.CanvasTexture(c);texture.colorSpace=THREE.SRGBColorSpace;this.textures.push(texture);
+   const texture=new THREE.CanvasTexture(c);texture.colorSpace=THREE.SRGBColorSpace;this.textures.push(texture);this.compassLabels.push({canvas:c,texture,label:name});
    const material=new THREE.SpriteMaterial({map:texture,transparent:true,depthWrite:false});this.materials.push(material);
    const sprite=new THREE.Sprite(material);sprite.position.set(x,.035,z);sprite.scale.set(.17,.17,.17);compass.add(sprite);
   }
+  this.theme.addEventListener("change",this.themeChanged);this.themeChanged();
   this.resize=new ResizeObserver(()=>this.request());this.resize.observe(host);
   document.addEventListener('visibilitychange',this.visible);
   this.renderer.domElement.addEventListener('webglcontextlost',this.contextLost);
   this.renderer.domElement.addEventListener('webglcontextrestored',this.contextRestored);
  }
+ private themeChanged=()=>{
+  const color=getComputedStyle(this.host).getPropertyValue('--muted').trim()||'#9bbac9';
+  for(const {canvas,texture,label}of this.compassLabels){const ctx=canvas.getContext('2d')!;ctx.clearRect(0,0,64,64);ctx.font='500 42px system-ui';ctx.fillStyle=color;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(label,32,32);texture.needsUpdate=true;}
+  this.request();
+ };
  private visible=()=>{if(!document.hidden)this.request();};
  private contextLost=(e:Event)=>{e.preventDefault();this.host.dataset.mountRenderer='context-lost';};
  private contextRestored=()=>{this.host.dataset.mountRenderer='blender-webgl';this.request();};
@@ -115,7 +127,13 @@ class MountRenderer{
   const valid=known(s,live),status=!live?'Offline':s.connected!==true?'Disconnected':!valid?'Pointing unavailable':s.slewing?'Slewing':s.atHome?'Home':s.atPark?'Parked':s.trackingEnabled?'Tracking':'Stopped';
   const signature=JSON.stringify([valid?s.altitude:45,valid?s.azimuth:0,status,camera.azimuth,camera.elevation]);if(signature===this.signature)return;this.signature=signature;
   const alt=(valid?s.altitude as number:45)*Math.PI/180,az=(valid?s.azimuth as number:0)*Math.PI/180;
-  this.optics.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,-1),new THREE.Vector3(Math.sin(az)*Math.cos(alt),Math.sin(alt),-Math.cos(az)*Math.cos(alt)));
+  // Camera/status-only updates must not restart an in-flight pointing transition.
+  const pointing=valid?`${s.altitude},${s.azimuth}`:'';
+  if(pointing!==this.model.dataset.pointing||valid!==this.pointingKnown||!valid){
+   const target=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,0,-1),new THREE.Vector3(Math.sin(az)*Math.cos(alt),Math.sin(alt),-Math.cos(az)*Math.cos(alt)));
+   this.motion.setTarget(target,performance.now(),!valid||!this.pointingKnown||this.reducedMotion.matches);
+  }
+  this.pointingKnown=valid;
   this.currentCamera={...camera};this.model.classList.toggle('is-offline',!valid);
   this.model.dataset.pointing=valid?`${s.altitude},${s.azimuth}`:'';this.model.dataset.view=`${camera.azimuth.toFixed(1)},${camera.elevation.toFixed(1)}`;
   this.status.textContent=status;this.status.classList.toggle('moving',valid&&s.slewing===true);
@@ -125,6 +143,8 @@ class MountRenderer{
  private request(){if(this.alive&&!this.frame)this.frame=requestAnimationFrame(()=>{this.frame=0;this.draw();});}
  private draw(){
   if(!this.alive||!this.host.isConnected||!this.host.getBoundingClientRect().width||document.hidden)return;
+  const moving=this.motion.advance(performance.now(),this.reducedMotion.matches);
+  this.optics.quaternion.copy(this.motion.current);
   const width=this.host.clientWidth,height=this.mini?Math.max(16,this.host.clientHeight-12):330;
   this.renderer.setSize(width,height,false);const aspect=width/height,halfHeight=1.52;
   this.camera.left=-halfHeight*aspect;this.camera.right=halfHeight*aspect;this.camera.top=halfHeight;this.camera.bottom=-halfHeight;this.camera.updateProjectionMatrix();
@@ -134,8 +154,10 @@ class MountRenderer{
   fitMountCamera(this.camera,new THREE.Box3().setFromObject(this.scene),width/height);
   this.renderer.render(this.scene,this.camera);
   this.host.dataset.renderFrames=String(++this.frames);this.host.dataset.renderGeometries=String(this.renderer.info.memory.geometries);this.host.dataset.renderTextures=String(this.renderer.info.memory.textures);
+  if(moving)this.request();
  }
  dispose(){
+  this.theme.removeEventListener("change",this.themeChanged);
   this.alive=false;cancelAnimationFrame(this.frame);this.resize.disconnect();document.removeEventListener('visibilitychange',this.visible);
   this.renderer.domElement.removeEventListener('webglcontextlost',this.contextLost);this.renderer.domElement.removeEventListener('webglcontextrestored',this.contextRestored);
   for(const material of this.materials)material.dispose();for(const texture of this.textures)texture.dispose();for(const g of this.localGeometry)g.dispose();

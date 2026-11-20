@@ -9,13 +9,13 @@ const headers=new Map<string,{key:string;panel:HTMLDivElement}>();
 let used=new Set<string>();
 export function clearTargetHeaders(){used=new Set();}
 export function finishTargetHeaders(){
- for(const [id,entry] of headers){if(used.has(id))continue;const chart=entry.panel.querySelector<HTMLElement>('.target-altitude');if(chart){resize.unobserve(chart);plots.delete(chart);}headers.delete(id);}
+ for(const [id,entry] of headers){if(used.has(id))continue;const chart=entry.panel.querySelector<HTMLElement>('.target-altitude');if(chart){resize.unobserve(chart);plots.delete(chart);}entry.panel.querySelector(".target-framing")?.dispatchEvent(new Event("dispose"));headers.delete(id);}
 }
 export function targetHeader(target:Target,site?:Site,profileId?:string,now=Date.now()){
  const day=site?siteDate(new Date(now-12*3600000),site.timeZone):undefined;
  const key=JSON.stringify([target.editableFields,site,profileId,day]);used.add(target.id);
  const cached=headers.get(target.id);if(cached?.key===key){updateVisibilityClock(cached.panel,now);return cached.panel;}
- if(cached){const old=cached.panel.querySelector<HTMLElement>('.target-altitude');if(old){resize.unobserve(old);plots.delete(old);}}
+ if(cached){cached.panel.querySelector(".target-framing")?.dispatchEvent(new Event("dispose"));const old=cached.panel.querySelector<HTMLElement>('.target-altitude');if(old){resize.unobserve(old);plots.delete(old);}}
  const panel=document.createElement('div');panel.className='target-planning';headers.set(target.id,{key,panel});
  const value=(key:string)=>target.editableFields?.find(f=>f.key===key)?.value;
  const ra=value('RightAscension'),dec=value('Declination'),rotation=value('Rotation');

@@ -19,7 +19,7 @@ export function updateSequenceClocks(live:boolean,now=Date.now()){
 
 // WaitForTime has no RemainingTime property in NINA. Reproduce its observing
 // day rule using the NINA host's reported zone, never the browser's local zone.
-export function rolloverDeadline(details:Record<string,unknown>,observedAt:string,zone:string):number {
+export function rolloverDeadline(details:Record<string,unknown>,observedAt:string,zone:string,night?:string):number {
  const {hours,minutes,seconds,rolloverTime}=details;
  if(![hours,minutes,seconds].every(v=>typeof v==='number'&&Number.isInteger(v))||Number(hours)<0||Number(hours)>23||Number(minutes)<0||Number(minutes)>59||Number(seconds)<0||Number(seconds)>59||typeof rolloverTime!=='string')return NaN;
  const match=/^(\d{2}):(\d{2}):(\d{2})$/.exec(rolloverTime);if(!match)return NaN;
@@ -28,8 +28,9 @@ export function rolloverDeadline(details:Record<string,unknown>,observedAt:strin
   const format=new Intl.DateTimeFormat('en-CA',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'});
   const parts=(time:number)=>Object.fromEntries(format.formatToParts(time).map(p=>[p.type,p.value]));
   const now=parts(observed),clock=+now.hour*3600 + +now.minute*60 + +now.second;
-  const dayShift=clock<rollover&&target>=rollover?-1:clock>=rollover&&target<rollover?1:0;
-  const wall=Date.UTC(+now.year,+now.month-1,+now.day+dayShift,Number(hours),Number(minutes),Number(seconds));let result=wall;
+  const nightParts=night&&/^(\d{4})-(\d{2})-(\d{2})$/.exec(night);
+  const dayShift=nightParts?(target<rollover?1:0):clock<rollover&&target>=rollover?-1:clock>=rollover&&target<rollover?1:0;
+  const wall=Date.UTC(nightParts?+nightParts[1]:+now.year,(nightParts?+nightParts[2]:+now.month)-1,(nightParts?+nightParts[3]:+now.day)+dayShift,Number(hours),Number(minutes),Number(seconds));let result=wall;
   for(let i=0;i<3;i++){const p=parts(result);result+=wall-Date.UTC(+p.year,+p.month-1,+p.day,+p.hour,+p.minute,+p.second);}
   return result;
  }catch{return NaN;}

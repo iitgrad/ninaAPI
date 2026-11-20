@@ -1,3 +1,5 @@
+import {createTelemetryConnection} from "./telemetry-connection";
+import {mountBulkConnections} from "./bulk-connections";
 import {mountReplay,type ReplayFrame} from "./replay";
 import {sequenceCommandIdentity,sequenceStopState} from './sequence-command-state';
 import {updateSequenceClocks} from './sequence-clock';
@@ -59,9 +61,8 @@ document
 let liveCurrent:Envelope|null=null;
 let replayFrame:ReplayFrame|null=null;
 let replayMode=false;
+let replayFollow=true;
 let current: Envelope | null = null,
-  websocket: WebSocket | null = null,
-  retry = 1000,
   currentSession = "",
   lastMetric = "";
 let socketReady = false;
@@ -126,13 +127,21 @@ async function request(
   return data;
 }
 mountDashboard();
+const updateBulkConnections=mountBulkConnections({
+ states:()=>current?.snapshot?.states??{},session:()=>current?.snapshot?.sessionId??"",replay:()=>replayMode,
+ reason:(device,action)=>commandReason(device,action,true),
+ send:(device,action,id)=>send(device,action,id,undefined,true,true),
+ busy:value=>{bulkConnectionsRunning=value;},notice,
+});
 const tools = el<HTMLDialogElement>("tools-dialog");
 el("open-tools").onclick = () => tools.showModal();
 el("close-tools").onclick = () => tools.close();
 function operations(): Operation[] {
   return (topic("operations").items ?? []) as Operation[];
 }
-function commandReason(device: string, action: string): string {
+let bulkConnectionsRunning=false;
+function commandReason(device: string, action: string, withinBulk=false): string {
+  if(bulkConnectionsRunning&&!withinBulk)return "Equipment connections are being updated.";
   if(replayMode)return "Replay is read-only. Return to Live to control equipment.";
   if (preview) return "Commands are disabled in design preview.";
   if (!fresh()) return "Waiting for fresh, connected telemetry.";
@@ -252,8 +261,9 @@ async function send(
   deviceId?: string,
   parameters?: Record<string, unknown>,
   rejectKnown = false,
+  withinBulk = false,
 ) {
-  const reason = commandReason(device, action);
+  const reason = commandReason(device, action, withinBulk);
   if (reason) {
     notice(reason);
     return;
@@ -397,7 +407,7 @@ function renderActions() {
   const startReason = commandReason("sequence", "start");
   write(
     "sequence-action-hint",
-    replayMode ? "Replay · controls disabled" : preview
+    replayMode ? "" : preview
       ? "Preview · controls disabled"
       : topic("application").sequenceRunning
         ? "Sequence running"
@@ -405,6 +415,10 @@ function renderActions() {
   );
 }
 const updateDevicePanels = mountDevicePanels({
+  thermalSamples:()=>replayMode?replayFrame?.cameraThermal:undefined,
+  replay:()=>replayMode,
+  readings:()=>replayMode?!!replayFrame&&!replayFrame.gap:!preview&&fresh(),
+  clock:()=>replayMode&&replayFrame?replayFrame.at:Date.now(),
   states: () => current?.snapshot?.states ?? {},
   session: () => current?.snapshot?.sessionId ?? "",
   live: () => !preview && fresh(),
@@ -462,6 +476,7 @@ function updateClock() {
   updateExposureClock(readingsAvailable,replayMode?replayFrame?.at:undefined);
   updateSequenceClocks(readingsAvailable,replayMode?replayFrame?.at:undefined);
   renderActions();
+  updateBulkConnections();
   updateDevicePanels();
   updateSequenceEditor();
   updateSequenceLibrary();
@@ -472,10 +487,11 @@ document.addEventListener("visibilitychange", updateClock);
 function render() {
   const states = current?.snapshot?.states ?? {},
     live = replayMode?!!replayFrame&&!replayFrame.gap:preview||fresh();
-  renderDashboard(states, live, current?.snapshot?.sessionId ?? "",replayMode?replayFrame?.at:undefined);
+  renderDashboard(states, live, current?.snapshot?.sessionId ?? "",replayMode?replayFrame?.at:undefined,!replayMode||replayFollow);
   const empty=el("image-empty");
   empty.querySelector("strong")!.textContent=replayMode?"No recorded image":"Waiting for an image";
   empty.querySelector("span")!.textContent=replayMode?"No image preview was recorded at this time.":"The next image preview will appear here.";
+  if(replayMode)write("sequence-freshness",replayFrame?.gap?"Recording gap":"Recorded");
   el<HTMLImageElement>("latest-preview").alt=replayMode?"Recorded image preview":"Latest image from N.I.N.A.";
   const app = topic("application"),
     diagnostic = topic("diagnostics");
@@ -580,25 +596,28 @@ function renderPlot() {
       .join(" "),
   );
 }
-function connect() {
-  const socket = new WebSocket(
-    `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${gatewayBase}/socket`,
-  );
-  websocket = socket;
-  socket.onopen = () => {
-    socketReady = true;
-    retry = 1000;
-  };
-  socket.onmessage = (event) => {
-    if (socket !== websocket) return;
+const telemetryConnection = createTelemetryConnection({
+  url: () => `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${gatewayBase}/socket`,
+  renew: () => request(gatewayBase ? "/auth/dashboard-session" : "/auth/local-session", {}, AbortSignal.timeout(10000)),
+  state(open) {
+    socketReady = open;
+    if (!open) {
+      if(liveCurrent)liveCurrent.bridge.connected=false;
+      if (!replayMode && current) current.bridge.connected=false;
+      render();
+    }
+  },
+  receive(data) {
     try {
-      current = JSON.parse(String(event.data)) as Envelope;
+      const next = JSON.parse(data) as Envelope;
+      if (!next || typeof next.bridge?.connected !== "boolean" || !("snapshot" in next)) return false;
+      current = next;
     } catch {
       notice("An invalid telemetry message was ignored.");
-      return;
+      return false;
     }
     liveCurrent=current;
-    if(replayMode){current=replayFrame?{bridge:{connected:false},snapshot:replayFrame.snapshot}:null;return;}
+    if(replayMode){current=replayFrame?{bridge:{connected:false},snapshot:replayFrame.snapshot}:null;return true;}
     if (current.snapshot && current.snapshot.sessionId !== currentSession) {
       if (currentSession && pending.size)
         notice(
@@ -610,19 +629,20 @@ function connect() {
       lastMetric = "";
     }
     render();
-  };
-  socket.onclose = () => {
-    if (socket !== websocket) return;
-    socketReady = false;
-    if(liveCurrent)liveCurrent.bridge.connected=false;
-    if (!replayMode&&current) current.bridge.connected = false;
-    render();
-    setTimeout(connect, retry);
-    if (gatewayBase)
-      void request("/auth/dashboard-session", {}).catch(() => {});
-    retry = Math.min(10_000, retry * 2);
-  };
-}
+    return true;
+  },
+});
+function connect() { telemetryConnection.start(); }
+setInterval(() => { if (!preview) telemetryConnection.check(); }, 1000);
+document.addEventListener("visibilitychange", () => {
+  if (!preview && document.visibilityState === "visible") telemetryConnection.resume();
+});
+window.addEventListener("focus", () => {
+  if (!preview) telemetryConnection.resume();
+});
+window.addEventListener("pageshow", event => {
+  if (!preview && event.persisted) telemetryConnection.resume();
+});
 async function start() {
   try {
     if (preview) {
@@ -661,6 +681,7 @@ async function start() {
   }
 }
 mountReplay({
+  follow(enabled){replayFollow=enabled;render();},
   read:(path,signal)=>request(path,undefined,signal),
   mode(active){replayMode=active;replayFrame=null;current=active?null:liveCurrent;samples.length=0;lastMetric="";confirm.close();document.querySelectorAll<HTMLDialogElement>("dialog[open]").forEach(d=>d.close());render();},
   frame(frame){if(replayFrame&&frame.at<replayFrame.at){samples.length=0;lastMetric="";}replayFrame=frame;current={bridge:{connected:false},snapshot:frame.snapshot};render();}

@@ -27,7 +27,8 @@ public sealed partial class ControlAdapter : IFocuserConsumer, IFilterWheelConsu
     private readonly Queue<object> focusPoints = new();
     private readonly Queue<object> guidePoints = new();
     private readonly Queue<object> imageHistory = new();
-    private readonly Channel<BitmapSource> previews = Channel.CreateBounded<BitmapSource>(new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropOldest });
+    private sealed record PreviewFrame(BitmapSource Image, double Background, double Clipping);
+    private readonly Channel<PreviewFrame> previews = Channel.CreateBounded<PreviewFrame>(new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropOldest });
     private Task previewWorker;
     private long imageNumber;
     private long previewNumber;
@@ -104,16 +105,22 @@ public sealed partial class ControlAdapter : IFocuserConsumer, IFilterWheelConsu
         try
         {
             if (disposed) return;
-            var bitmap = e.RenderedImage?.Image;
+            var bitmap = e.RenderedImage?.OriginalImage;
             if (bitmap is null) return;
             // Never freeze/mutate a host-owned image. Nonfrozen sources are copied
             // to a small thumbnail on their owning thread before enqueueing.
             if (!bitmap.IsFrozen)
             {
-                var thumb = new TransformedBitmap(bitmap, new ScaleTransform(Math.Min(1, 800d / bitmap.PixelWidth), Math.Min(1, 800d / bitmap.PixelWidth)));
-                bitmap = BitmapFrame.Create(thumb); bitmap.Freeze();
+                var scale = Math.Min(1, 800d / Math.Max(bitmap.PixelWidth, bitmap.PixelHeight));
+                var thumb = new TransformedBitmap(bitmap, new ScaleTransform(scale, scale));
+                bitmap = new WriteableBitmap(thumb); bitmap.Freeze();
             }
-            previews.Writer.TryWrite(bitmap);
+            var settings = AdvancedAPI.Controls.Profile.ActiveProfile.ImageSettings;
+            var background = settings.AutoStretchFactor;
+            var clipping = settings.BlackClipping;
+            previews.Writer.TryWrite(new PreviewFrame(bitmap,
+                double.IsFinite(background) && background > 0 && background < 1 ? background : 0.2,
+                double.IsFinite(clipping) && clipping >= -20 && clipping <= 0 ? clipping : -2.8));
         }
         catch (Exception) { Interlocked.Increment(ref publishErrors); }
     }
@@ -126,16 +133,7 @@ public sealed partial class ControlAdapter : IFocuserConsumer, IFilterWheelConsu
                 if (!previews.Reader.TryRead(out var source)) continue;
                 try
                 {
-                    byte[] bytes = null; int width = 0, height = 0;
-                    foreach (var limit in new[] { 800, 480, 256 })
-                    {
-                        var scale = Math.Min(1, (double)limit / Math.Max(source.PixelWidth, source.PixelHeight));
-                        var image = new TransformedBitmap(source, new ScaleTransform(scale, scale)); image.Freeze();
-                        var encoder = new JpegBitmapEncoder { QualityLevel = 65 }; encoder.Frames.Add(BitmapFrame.Create(image));
-                        using var memory = new MemoryStream(); encoder.Save(memory); bytes = memory.ToArray(); width = image.PixelWidth; height = image.PixelHeight;
-                        if (bytes.Length <= 40 * 1024) break;
-                    }
-                    if (bytes.Length > 40 * 1024) throw new InvalidDataException("Preview exceeds bound.");
+                    var (bytes, width, height) = DashboardPreview.Encode(source.Image, source.Background, source.Clipping);
                     Enqueue("preview", new { revision = Interlocked.Increment(ref previewNumber), width, height, jpeg = Convert.ToBase64String(bytes), bytes = bytes.Length });
                 }
                 catch (Exception) { Interlocked.Increment(ref publishErrors); }

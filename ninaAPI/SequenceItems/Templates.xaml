@@ -60,6 +60,19 @@
         </mini:MiniSequenceItem>
     </DataTemplate>
 
+    <HierarchicalDataTemplate DataType="{x:Type local:WaitUntilSafeOrDeadline}" ItemsSource="{Binding Items}">
+        <nina:HierarchicalSequenceContainerView>
+            <nina:HierarchicalSequenceContainerView.SequenceContainerContent>
+                <StackPanel Orientation="Horizontal" Margin="5">
+                    <TextBlock VerticalAlignment="Center" Text="Imaging cutoff (with UTC offset)" />
+                    <TextBox Width="240" Margin="8,0,0,0"
+                             AutomationProperties.Name="Imaging cutoff with UTC offset"
+                             Text="{Binding Deadline, UpdateSourceTrigger=PropertyChanged}" />
+                </StackPanel>
+            </nina:HierarchicalSequenceContainerView.SequenceContainerContent>
+        </nina:HierarchicalSequenceContainerView>
+    </HierarchicalDataTemplate>
+
     <DataTemplate DataType="{x:Type local:SendErrorTrigger}">
         <nina:SequenceBlockView DataContext="{Binding}">
             <nina:SequenceBlockView.SequenceItemContent>

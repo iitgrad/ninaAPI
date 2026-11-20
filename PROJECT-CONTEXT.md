@@ -1587,3 +1587,585 @@ Original October24 recording's nine files independently matched the pre-replay c
 recorder remained connected/armed, NINA stopped. Final user entry: refresh
 https://starfront.thewcl.com/dashboard/ → Recordings → October24,20:09Central.
 Replay feature commit745508a follows the pushed baseline58db473.
+
+
+## October25: NAS science-frame0.5.3 upgrade running independently
+
+Kevin requested a read-only all-target sidecar inventory, then authorized actual
+remeasurement to0.5.3 and missing plate solves. Important inventory correction:
+165initially-reported missing sidecars were Keep symlinks to measured originals
+(46IC1396/119NGC6992F). Correct scope23,128unique regular non-test LIGHT FITS,
+all with sidecars;17,023old0.5.2measurements need pixel refresh;2,993usable frames
+need missing/invalid WCS;36known damaged M16 inputs (35empty/1truncated) are
+blocked;11existing provisional WCS retained/reported, not falsely verified.
+No transfers, equipment actions, stacks, deletions or website publication.
+
+Operations workflow:ops/workflows/measurement-upgrade-v053/run.py,test_run.py.
+Six preservation/validation tests passed. Durable NAS run directory
+/volume1/AstroImages/.starfront-upgrades/measurement-0.5.3-20261025;workerPID22876.
+Read status via NAS SSH HostKeyAlias=KLM-NAS.local,ccdjunkie@100.87.173.99:
+python3 <run-directory>/run.py status. State.sqlite pins every source and records
+per-path progress/errors/gatewayjobIDs;worker.log/status.json/pilot-verification.json
+and final report.json stay on NAS. No shared gateway/binary replaced. One analyzer
+thread on scratch hard links, original FITS read-only, atomic merge of analysis
+fields preserving exact unknown/review/WCS tokens under existing shared locks;
+ASTAP uses existing persistent gateway in bounded batches. Final every-frame
+readback required. Pilot17.41s passed actual0.5.3fields and identical FITS SHA256,
+reviews/WCS preservation. Existing classification daemon later refreshed its own
+automatic_review revision/time; keep status/policy/reasons and WCS unchanged.
+
+Temporary heartbeat finish-starfront-measurement-and-plate-solve-upgrade active
+on this chat. Kevin then requested one-minute checks for ETA sampling, followed
+by five-minute checks once a useful combined estimate can be reported. Same
+automation updated to INTERVAL=1. First44full-run completions over479seconds:
+11.14s/frame,16,978remaining≈52.5hours measurements alone; solve timings pending.
+Do not call that a combined completion ETA. Heartbeat stays quiet on routine
+progress, samples enough actual solves, reports range, restores5minutes, then
+reports completion/exceptions and disables itself. Operations evidence/run notes:
+.codex-artifacts/2026-10-25-measurement-upgrade-v053/. No full-completion claim yet.
+
+## October25 — system light theme
+
+Web dashboard now follows prefers-color-scheme live: white surfaces, dark text,
+contrasting status colors, theme-aware SVG plots and compass labels. Dark
+fallback colors retained; image pixels and physical telescope coordinates unchanged.
+Strict TypeScript and seven visibility/replay tests passed. Playwright verified
+Live, controls dialog, real-recording Replay, 390px layout, theme switching with
+no page errors, unchanged image URL and pointing. Evidence artifacts/2026-10-25-light-theme.
+Static assets published atomically to LXC gateway without restarting any service.
+Authenticated public proxy CSS SHA256 d80554d7284ce9ee07c12a5d23cbb87dbb28d948650546bd371e00f9c4af42da.
+Gateway PID176566 and recorder PID176268 unchanged. No NUC/equipment commands.
+Concurrent replay and device-panel edits were preserved; no blanket commit.
+
+## October25 — Live sequence follows current execution
+
+Opening Live now expands the active step's ancestors and centers that row in the
+sequence panel, using the existing cached WebSocket projection. Each new active
+step is centered once; repeated telemetry for the same step preserves manual
+scrolling. Replay retains its explicit Follow toggle. No new polling or equipment
+commands. Strict TypeScript and six current-step/replay tests passed. Isolated
+Playwright Live fixture verified initial centering, step transitions, manual-scroll
+preservation and 390px mobile layout with no application errors or command POSTs.
+Browser plugin unavailable; used regular Playwright. Evidence in /tmp/live-sequence-scroll-*.png
+and /tmp/live-sequence-scroll-qa.py. Static app.js deployment requires no NINA,
+recorder or gateway restart.
+
+## October26 — Dashboard bulk equipment connections
+
+Web header now has Connect All and Disconnect All with brief confirmations.
+Batches use selected allowed devices, exclude the always-connected safety
+monitor and retired Pegasus weather connection, submit one typed command at a
+time and wait for its pushed operation receipt. Profile/session changes, failure
+or unknown/pending outcomes stop the batch; no automatic retries or NINA polling.
+Replay hides the controls. Other controls are blocked during a batch.
+Nine browser logic tests and strict TypeScript passed. Playwright tested cancel,
+six sequential simulated disconnects without safety, desktop/mobile layout and
+no app errors. Evidence /tmp/starfront-web-bulk-qa.log and screenshots.
+JS/CSS published atomically without service restart; public authenticated hashes
+verified. Gateway PID176566 and recorder PID176268 unchanged. No real equipment
+commands. Current app.js SHA2564cf6538014f005ec864200d3e503e62a7bc66d98e864b8b43275ce50f8b9f3d8;
+CSS30d08319551f9900d1f7232663bdee695aa8c8f35cf8c7a160c10629235de6b6.
+
+Corresponding iOS fixes are in Operations/apps/StarfrontIOS: short confirmation,
+execution-time safety exclusion, lazy stable sequence rows, indexed children and
+reused timestamp parsing/formatting. Build2026102601 installed/launched on
+communicator; simulator240-step5Hz feed verified scrolling position remains
+unchanged while telemetry arrives. Simulator Disconnect All completed six fake
+devices, leaving safety connected. Physical disconnect was not exercised.
+
+## October26 — automatic replay indexing deployed
+
+Gateway0.4.30 watches local recording manifests and prebuilds closed-night replay
+indexes. A coalesced single-consumer queue and existing replay gate prevent
+concurrent builds; startup plus30-second filesystem-only fallback recover missed
+finishes. Two newest closed recordings only, existing cache/storage bounds,
+no NINA polling, no recorder change. Cancellation cleans partial outputs.
+Malformed/oversized inputs preserve originals and do not block the other candidate.
+18 service tests passed including live file-finish detection and startup/cache reuse.
+
+First deployment used framework-dependent deps against the existing self-contained
+runtime and failed startup validation; automatic rollback restored0.4.29. Rebuilt
+self-contained linux-x64/net8.0 runtime8.0.29 to match existing packaging, then
+successfully deployed Service.dll, deps and Core.dll. Config and web assets
+unchanged; NINA untouched. Final gateway PID225252, recorder PID176268 unchanged,
+bridge connected, NRestarts0, MemoryCurrent218402816bytes at verification.
+Actual latest recording f87f7cbc-0587-4979-81d0-65cb82759a28 indexed automatically
+before any Replay request,329minute chunks. Subsequent cached index read10.8ms
+on LXC, exact index mtime unchanged. Metadata fingerprints of every original
+recording file unchanged. Cache now holds ac9a7abd and f87f7cbc.
+Evidence LXC ~/.local/share/starfront-web/autoindex-{deployment,verification}-20261026.json;
+rollback-before-autoindex-selfcontained-20261026 preserves prior binaries.
+Local /tmp/replay-warmup-service-tests.log and publish-selfcontained.log.
+
+## October26 — recorded camera temperature graph
+
+Gateway0.4.31 and chart assets deployed. Replay camera card preserves all numeric
+readings and adds temperature/cooler-power curves beneath them. Bounded recorded
+history (1hour,720samples,5second sampling; null gap markers) is serialized into
+minute chunk seeds, so direct/backward seeks show prior readings without extra
+NINA calls or client-side prefetch loops. Session/profile/camera context resets;
+no future samples. Replay cache fingerprint replay-2 invalidates disposable old
+indexes; background warming rebuilt both latest recordings successfully.
+
+20 service tests and9 thermal/timeline tests passed; strict TypeScript passed.
+Playwright tested readings+graph, direct seek/backwards seek, Follow, return Live,
+1600x1000 and390x844, no app errors/equipment POSTs. Screenshots/logs:
+/tmp/replay-camera-graph-{desktop,mobile}.png and replay-camera-graph-qa.log.
+Actual production cooling replay ac9a7abd at Cool Camera+120sec returned600valid
+historical samples,25.3°C through11.7°C,36%power, none past selectedtime.
+LXC evidence thermal-{deployment,verification}-20261026.json. GatewayPID225772,
+recorderPID176268 unchanged, no NINA changes, originals/config unchanged. Public
+HTTP200 and exactJS2e901110c73627280020d74dcae62297391f60daf3efc66c02e9f4c22b052b86
+andCSS730d5c8c98217ee855e979108984fe831fd24a33ad4ab3e7b88a24cacb7e98cf verified.
+Rollback binaries/assets:rollback-before-thermal-20261026. No blanket commit.
+
+## October26 — simplified camera temperatures
+
+Live and Replay camera cards now show current temperature and signed delta
+(current minus target), side by side in identical19px type. Small labels identify
+Current and delta to the actual target setpoint. Missing sensor/setpoint gives an
+em dash; rounded negative zero displays0.0. Removed Gain, Bin and numeric cooler
+power from this card. Graph remains below in both modes, with temperature/power
+legend; detail controls and image-statistics gain remain unchanged.
+
+Strict TypeScript passed. Playwright verified above-target, exact-target and
+below-target readings, matching fonts, no redundant fields, historical graph,
+backwards seeking, Live return, desktop/mobile and no app errors or commands.
+Evidence /tmp/camera-delta-qa.log and camera-delta-{desktop,mobile}.png. Static
+JS/CSS deployed and public authenticated hashes verified; gateway225772 and
+recorder176268 unchanged, no service or NINA restart. Public JS
+ a45d4511974ae8ecb6176432ded3938c46ea3fa610191ca667de87d7d13c6dbd;
+CSSdfedb12c0f898d69b8cc436521a1802e1f3e0e000eba1880115c4637ec006a90.
+
+## October26 — autofocus preview capture verified, no runtime change
+
+Kevin requested ensuring future autofocus images appear in Replay. Inspection
+confirmed native AutoFocusVM calls imagingMediator.PrepareImage; its false second
+PrepareImageParameters argument disables DetectStars, not display/preview events.
+The existing plugin subscribes Imaging.ImagePrepared and sends bounded JPEGs;
+the recorder persists every received preview by content independently of ImageSaved.
+No missing runtime hook was found. No plugin/service/recorder restart or deployment.
+
+Independently verified actual Oct25-night recording ac9a7abd-1f76-4d9b-bad9-6d27a73a7fe0:
+Run Autofocus started2026-10-26T04:48:56.761Z. At+15/+30/+60/+120sec, preview
+revisions3/4/6/10 were distinct stored JPEGs (5424/5437/5491/5485bytes), each file
+byte-identical to Replay response; focus remainedrunning, points0/1/4/7. These
+are autofocus previews, not claimed full-resolution autofocus FITS. Recorder
+still records only while a recording is active; arbitrary manual AF outside a
+recorded session is not retroactively available.
+Added regression cases: recorder saves three distinct AF JPEGs with no image topic,
+and Replay resolves two AF previews at correct times including backward seeks
+without any science-image save.18recorder tests/111assertions and21service tests
+passed. Evidence /tmp/autofocus-{recorder,replay}-tests.log. Existing implementation
+already satisfies future recorded-session capture; no equipment action issued.
+
+## October26 — reproduced and fixed autofocus replay presentation
+
+Kevin reported autofocus images still not visible. Prior file verification was
+insufficient UI evidence. Reproduced actual authenticated public dashboard with
+Oct25 recording ac9a7abd-1f76-4d9b-bad9-6d27a73a7fe0 at AF+15/30/60/120seconds.
+JPEGs decoded800x534, but near-black (median3/255,p99=3,p99.9=5,max162) and caption
+incorrectly said No image received because it relied on the separate ImageSaved
+science topic. Later overnight recording f87f7cbc (Oct26 01:32Central) contains no
+AF steps; AF is in the Oct25 18:05Central recording around23:49Central.
+
+Fixed web only: caption uses prepared/AF preview even absent a saved science image;
+preview dimensions use JPEG metadata. Very dark autofocus thumbnails automatically
+get a display-only brightness8/contrast1.15 filter, with Brighten toggle to restore
+original presentation. Ordinary bright/science previews unchanged. Also reset
+previewRevision when clearing a missing preview, restoring src if needed; fixes
+same-revision image failing to return after a missing-preview seek.
+
+Strict TypeScript passed. Actual-public browser verified four changing decoded
+AF images, correct captions and filter; toggle restores original. A browser-only
+missing-preview fixture verified blank→same-revision restoration. Desktop1600x1000
+andmobile390x844 had no app errors/overflow. Deployed onlyapp.js, no NINA/gateway/
+recorder restart. Public SHA2568a6263a1171e4b896c4870323c52881f14ba48f4fc8344fb190853b4763be6d5.
+Production test repeated without asset override. Evidence /tmp/actual-autofocus-
+{replay,fixed}.png, fixed-mobile.png and /tmp/autofocus-display-deployed.log;
+/tmp/autofocus-display-regression.log. Private short-lived browser-session files
+removed after verification; no credentials logged. Original recordings untouched.
+
+## November 4 — smooth mount visualization (local)
+
+WebGL mount views now damp toward each telemetry pointing quaternion using
+elapsed frame time (180 ms time constant, short-path slerp). New readings
+retarget from the displayed pose without snapping. Initial/reconnected readings,
+unavailable pointing and reduced-motion preference apply immediately. Coordinate
+readouts retain the actual telemetry; camera/status-only updates do not restart
+motion. Frames stop once settled; existing visibility and disposal guards remain.
+SVG fallback is unchanged.
+
+Verification: 12 mount tests passed, including first reading, mid-flight retarget,
+north wrap, frame-rate independence, exact settling and immediate resets. Strict
+TypeScript and browser bundle build passed. Isolated localhost Playwright fixture
+with synthetic positions used the real WebGL renderer: frame counts 2→12→21→116,
+then remained 116 at rest; disposal removed all children. No equipment commands,
+service restart, or deployment. Rebuilt local wwwroot/app.js only; production
+publication remains pending.
+
+## November 4 — shutdown and shared preview stretch deployed
+
+Kevin authorized stopping the overnight November 3 sequence, warming the camera,
+fixing dashboard/phone previews, and then completing the full equipment shutdown.
+Sequence stop a0df80a7-8727-4472-beb3-8d6557375880 succeeded at12:11:08Z.
+Warm 7a0354f6-7b90-483c-9392-c87839372ce3 succeeded12:15:30Z; subsequent
+telemetry verified coolerOn=false, coolerPower=0 and natural warming. Followed
+saved End of Session Shutdown: Stop Guiding, Find Home plus already-complete
+warming, disconnect other equipment. Home03ff139a-2f82-43da-9389-8ef90bee6007
+succeeded12:22:48Z; atHome=true, tracking=false, slewing=false verified before
+all six imaging devices disconnected. Safety monitor remains connected by design.
+No new observatory exposure, sequence start, roof command or power-off issued.
+
+Root cause verified in cached JPEGs: linear 16-bit background~510 became~2/255.
+ImagePrepared fires before NINA's display stretch (actual host ImageControlVM
+ProcessAndUpdateImage invokes ImagePrepared before ProcessImage). Plugin now reads
+OriginalImage, keeps high precision through WPF's Gray16→Gray32Float resize,
+then applies a bounded, median/MAD-based midtones display stretch before 8-bit
+JPEG. Uses profile AutoStretchFactor/BlackClipping (0.2/-2.8 on observatory).
+Same one-pending-preview queue and40KiB transport bound; JPEG retries480/256px
+if800px exceeds budget. No full-frame statistics calculation or host image mutation.
+8-bit source previews pass through without another stretch. Shared JPEG corrects
+web/iOS/native notification attachments; no frontend/iPhone build needed.
+Historical JPEGs and previously delivered notifications are unchanged.
+
+141core tests passed (four new tests for faint signal, outliers, degenerates,
+input preservation and bounds). Plugin cross-build/package passed, zero errors,
+47existing warnings. Standalone Windows WPF harness verified frozen/unfrozen
+Gray16, promoted Gray32Float, RGB48 and8-bit pass-through. Actual Veil H FITS from
+Kevin's screenshot rendered480x320/27,661bytes, JPEG median58/255 versus~2before;
+nebula visibly recovered. Copied FITS SHA256 remained
+ADFE1ADF763E6764F7DB0F35DB0A2045F57390EC68CB380CA63DE29D688FFE27.
+Windows simulator plugin0.4.32 captured0.1sec without saving, returned798x800
+JPEG29,273bytes/median51 and publishErrors0. Simulator prior5node sequence was
+saved/restored and simulated camera disconnected after test. No real APNs test sent.
+
+Production API save correctly rejected the truncated256node projection. Native
+NINA Save As preserved the FULL loaded root to
+C:\Users\astroadmin\Documents\N.I.N.A\Starfront-Preserved-20261104-PreviewFix.json,
+296,027bytes, SHA256074B014DE0EF99D2B78F5C58FC9B130BE28431CD13950C5243C393C3F9463716.
+Original saved plan and active-process log also copied to NUC Temp evidence.
+Graceful production restart PID6684→19372 installed tested0.4.32.0; all five package
+files hash-match staging and control.json unchanged. Restored preserved root with
+sequence/load a1092807-b9e5-481f-a444-0a7beab220cc, succeeded without starting.
+Hosted LXC gateway readback confirmed0.4.32.0/equipment, fresh bridge, correct
+Texas profile, sequenceRunning=false, all six imaging devices disconnected,
+safety connected. New production preview awaits a future image preparation;
+no claim of post-deployment real-camera or physical-iPhone visual validation.
+Rollback: NUC %LOCALAPPDATA%\Temp\StarfrontPreview-20261104\plugin-backup.
+Package SHA256500BE6AABCE56ABA4CF48E0E7659843B2526627AAA2E0A01318AE4B1D355D2AD.
+Local evidence/tools: artifacts/2026-11-04-preview-stretch; actual science copy and
+corrected JPEG in ~/Downloads/Starfront-preview-test-20261104. Changes uncommitted;
+unrelated web/replay/mount changes preserved.
+
+Kevin also asked why Rosette lacks a Mac dropdown thumbnail. Source inspection
+found NASMenuAssets' hardcoded five-target resource lookup and separate bundled/
+local M31/Veil mosaic definitions, neither containing Rosette. These are illustrative
+survey references, not captured-run previews. Explained that this is an implementation
+limitation. No dropdown code/assets changed or new image sourcing authorized yet.
+
+## November 4 — web framing fallback and persistent cache deployed
+
+Kevin authorized the web framing fix while preserving tonight's imaging. The
+framing gateway now tries CDS for 7 seconds, then NASA SkyView's canonical
+/current/cgi/runquery.pl endpoint. It downloads a bounded JPEG/FITS pair from one
+image set, validates the returned TAN tangent point and axes, and embeds the JPEG
+with an exact affine transform in a self-contained SVG of the requested camera
+field. No new image library or native dependency. Fixed HTTPS providers only;
+invalid dimensions/projections/image sets fail closed. Caption identifies survey
+reference colors. This is separate from captured-camera JPEG previews.
+
+Full geometry keys retain 8 memory entries and 32 atomic persistent SVGs under
+~/.local/share/starfront-web/Framing-v2 on Linux. Existing one-day private browser
+caching remains. Server's 50-second overall deadline includes queue waiting;
+browser's 60-second deadline independently ends configuration/image/decode loading
+with Retry. Failed configuration promises are evicted; Retry reloads fully, and
+superseded/disposed target requests are cancelled. Data URLs retain the existing
+CSP (no blob policy relaxation). Provider/network errors do not remain loading.
+
+30 service tests and 3 framing web tests passed; strict TypeScript passed. Live
+CDS timeout → NASA JPEG/FITS → registered SVG passed locally and on an isolated
+Linux gateway with a synthetic loopback-only bridge. Real Chromium verified SVG
+rendering at512x342 with37-degree rotation, HTTP503→Retry→visible image, hung image
+and hung profile request → terminal timeout. Four rotated WCS tests compare actual
+SVG pixel registration to camera/source tangent-plane coordinates.
+
+Deployment changed only the existing gateway's StarfrontControl.Service.dll and
+wwwroot/app.js. Release decompilation compared against the deployed assembly;
+behavior changes are confined to framing (other differences are reference/
+decompiler forms). To preserve unrelated pending frontend work, replaced only the
+framing module and two target-disposal hooks in the deployed JS baseline; did not
+publish the workspace's unrelated mount/replay changes. Source remains buildable
+normally; current local wwwroot/app.js was left intact. app SHA256
+7680f332cb9c19d3a68096c62e4e9610c321dc3b93e006d8f8e627ba8397b08e;
+service DLL9d1ec4c6937545bddb945c117e0c6e193b7b2bda6dd4a61cfd1cb9a24dd7ca70.
+
+Gateway-only restart225772→303240 reconnected its bridge. Recorder remainedPID
+176268, service.json hash unchanged, sequenceRunning=false before/after. No NINA
+restart, observatory configuration change, equipment command or sequence change.
+Production actual configured4.6023855x3.0710959-degree field loaded from NASA in
+23.346seconds; repeat1ms. A new process reused the prewarmed rotated field from
+disk in13ms. Rollback at LXC ~/.local/share/starfront-web/backups/framing-20261104.
+Isolated test gateway was stopped after verification. Evidence:
+artifacts/2026-11-04-web-framing; remote updates/framing-20261104.
+
+## November 5 — dashboard reconnect recovery deployed
+
+Dashboard now replaces a silent WebSocket after 30 seconds without a valid
+telemetry envelope, even when the browser never reports close/error. Returning
+to the visible tab, focusing the window, or restoring it from back/forward cache
+also reconnects. One socket and one retry timer are retained; overlapping return
+events coalesce, old callbacks are detached and identity-guarded. Authentication
+renewal precedes retries with a 10-second timeout; retry backoff caps at 10 seconds
+and resets after valid telemetry. Replay remains on its selected historical frame;
+preview mode starts no connection. No new equipment commands or NINA polling.
+
+Ten focused web tests passed (four recovery, three command-state, three bulk
+connection), strict TypeScript and browser builds passed. Regular Playwright used
+because Browser plugin unavailable: full deployed dashboard bundle on isolated
+localhost fixture recovered a silent stall and visibility/focus/pageshow events,
+returned Live, and issued no equipment POSTs or page errors. Browser test used
+synthetic sockets and accelerated time; physical Safari sleep/wake remains untested.
+Evidence /tmp/starfront-reconnect-20261105, including reconnected.png and browser-check.js.
+
+Published only the transport/lifecycle section into the existing production app.js;
+all bytes before/after the old connect function were preserved, excluding unrelated
+local frontend changes. Public authenticated HTTP200 SHA256 verified:
+f2333f092c3268ab8c364da7d7d4aec57edd91fcf00230f5b1cbe774cce63752.
+Local generated wwwroot/app.js rebuilt normally and includes existing local work;
+it is intentionally different from the narrowly patched production bundle.
+Gateway PID303240, recorder176268 and tunnel268049 unchanged; NINA PID19372 and
+session5f4d0182-57ee-4886-a504-24ebfed3d568 unchanged. Bridge fresh, sequence stopped,
+six imaging devices disconnected, safety connected before/after. Config and
+service binary unchanged. No restart or equipment command issued. Rollback and
+remote evidence: ~/.local/share/starfront-web/backups/reconnect-20261105.
+Already-open tabs need one reload to acquire this code; future stalls recover.
+
+## November 5 — imaging count progress and replay cleanup
+
+Kevin authorized deleting all old replays except the November4–5 night. Recorder
+was idle. Deleted16 older recording directories plus their disposable playback
+caches; retaineda32d87d5-d172-4d7c-a8e9-ab29c1c1512e only. All196 retained files
+were SHA256-verified unchanged. Freed816,234,211bytes including caches. Remote
+audit ~/.local/share/starfront-recorder/cleanup-20261105.json. No science FITS,
+NAS content or recorder configuration changed. The retained recording remains
+partial because it hit the512MiB session limit at00:01Central; cleanup does not
+restore missing telemetry or raise that limit.
+
+Kevin also requested image-count sequence progress, choosing actual counts plus
+“time-limited plan” instead of estimated totals for timed loops. Web progress now
+sums native TakeExposure/TakeSubframeExposure.ExposureCount (cumulative actual
+captures even if final iteration is pending/skipped). Excludes disabled and trigger
+branches; does not double-count SmartExposure wrappers or count setup actions.
+Fixed iteration plans multiply nested iteration limits, taking the most restrictive
+same-container limit. Unknown/conditional plans and partial projections never
+claim a complete denominator. Time-limited/partial counts replace the old percentage
+bar; exact finite plans retain image taken/planned progress and an accessible bar.
+
+Actual retained live snapshot:266 images taken · time-limited plan · shown portion.
+11web tests passed (seven imaging progress, four reconnect); strict TypeScript and
+browser builds passed. Isolated Playwright verified actual snapshot count, hidden
+timed percentage/bar, fixed7/12=58% with restored bar, and390px label fit, with no
+page errors or equipment POSTs. Fixtures only; Browser plugin unavailable.
+Evidence /tmp/starfront-image-progress-20261105.
+
+Published only the new progress helper/calculation/display into the deployed
+app.js baseline, preserving reconnect and unrelated web behavior. Public HTTP200
+SHA25618a5fb8cefe61bc49e6a585be9f60da2b289d920f6e9e89614935f2b9f8b5731
+verified. GatewayPID303240, recorder176268, NINAPID19372/session unchanged; sequence
+stopped, six imaging devices disconnected, safety connected before/after. No
+service/NINA restart or equipment command. Backup/evidence at LXC
+~/.local/share/starfront-web/backups/image-progress-20261105. Local generated bundle
+rebuilt from current source and still includes prior local work deliberately absent
+from the narrowly patched production bundle. Existing browser tabs need one reload.
+
+## November 5 — scheduled-night timeline deployed
+
+Kevin clarified that the evening plan's target start/end times should provide the
+graphic, alongside captured counts. Timed plans now show proportional colored
+windows with per-target planned times and actual image counts, plus an explicit
+scheduled-time percentage. The caption distinguishes elapsed time from image
+completion. Fixed-count plans retain exact image taken/planned progress.
+
+Uses explicit fixed WaitForTime/TimeCondition metadata within each main target;
+trigger/disabled branches are excluded. The loaded root's YYYY-MM-DD observing
+date pins windows across midnight and morning rollover, with site-zone/DST
+conversion. Other sequences use observed execution timing as available. Missing
+boundaries/providers are not guessed; the projection warning remains. A local
+clock advances live time, freezes disconnected time at the last sequence
+observation and uses replay's selected time. Target DOM is retained until its
+window/count signature changes. No NINA polling or extra service endpoints.
+
+Actual November4 plan: Veil19:09–21:09/52images, M31F21:09–23:29/57,
+M31B23:29–01:49/61, Rosette01:49–05:34/96 (Central; exact seconds retained).
+19focused web tests passed, strict TypeScript and builds passed. Isolated
+Playwright checked four-window desktop/mobile rendering,74%mid-Rosette,
+disconnected freeze,100%after finishing and morning rollover, and fixed7/12=58%
+fallback, with no page errors or equipment POSTs. Synthetic transport and actual
+loaded sequence fixture; Browser plugin unavailable. Evidence and screenshots:
+/tmp/starfront-night-timeline-20261105.
+
+Published only the timeline module, optional observing-date argument to the clock
+helper, sequence-renderer integration and local clock hooks into the deployed
+baseline, preserving unrelated local work and prior reconnect recovery. Public
+HTTP200 SHA256fe46befc7316fbeb8c631623e1d1068ca79c99cdf9c17267a7b30546b43145de
+verified. Gateway303240/recorder176268/NINA19372/session unchanged, sequence stopped,
+six imaging devices disconnected/safety connected before and after; service binary
+and config unchanged. No restart or equipment command. Backup and deployment
+verification: ~/.local/share/starfront-web/backups/night-timeline-20261105.
+Local generated bundle rebuilt normally and remains broader than the narrow
+production patch. Existing tabs need one reload to receive the new JavaScript.
+
+## November 5 — organized sequence controls deployed
+
+Sequence toolbar now groups existing buttons into File (Load, Save, Save as),
+Run (Start, Stop, Reset) and View (Collapse/Expand all). Labels are shorter and
+rows align without implicit grid holes. Existing nodes are moved, preserving
+handlers, confirmations, disabled states, IDs for operational controls and Replay
+hiding. New Save/Save-as IDs support scoped styling. No command API changes.
+
+Strict TypeScript/browser build passed. Isolated Playwright exercised desktop,
+390px mobile and expanded-panel alignment, Load dialog, Start confirmation/cancel,
+Collapse/Expand behavior, disabled Stop/Save-as and Replay control hiding. No page
+errors or command POSTs. Browser plugin unavailable; synthetic transport with
+actual stopped sequence fixture. Evidence /tmp/starfront-actions-layout-20261105.
+
+Published only the new layout helper plus its sequence-library initialization hook
+into the deployed JavaScript baseline. Public HTTP200 SHA256 verified:
+2be219b281a32eff1a1e0dcfc56591464aff12a4913c75369cfb3e56ec5f1155.
+Gateway303240, recorder176268, NINA19372 and session unchanged; sequence stopped,
+six imaging devices disconnected/safety connected before and after. No restart or
+equipment command. Backup/evidence: ~/.local/share/starfront-web/backups/actions-layout-20261105.
+Local generated bundle rebuilt normally; unrelated pending work remains outside
+this narrow production patch. Existing tabs need one reload.
+
+
+## November 6 — hosted camera Connect diagnosis after NUC power cycle
+
+Kevin reported Safari at starfront.thewcl.com/dashboard left Camera Connect
+unchanged with no connected indication. Local gateway and hosted gateway had
+fresh NUC session532263e6-a5a2-4e63-85f4-c297246df558, camera disconnected and no
+camera operations. Local CLI validation-only request and actual hosted WebKit
+validation returned valid=true without connecting equipment. Fresh Chromium and
+WebKit sessions both generated the expected camera Connect request when delivery
+was intercepted; this did not reproduce Kevin's original browser state.
+
+Kevin reloaded Safari, retried and reported working now. Fresh NUC telemetry
+confirmed ASI6200MM Pro connected/idle, cooler off. Connect operation
+b334402d-5331-473c-86af-7f4852cc83eb succeeded at2026-11-06T12:59:30.7347082Z.
+No camera execution command, runtime code change, service restart or deployment
+was issued by Codex. Original Safari failure cause remains unproven. Diagnostic
+browser sessions closed and temporary short-lived authentication file removed.
+
+
+## November 6 — notification image retention and title encoding fixed
+
+Kevin reported an older M31 B notification opening Image unavailable and showing
+`â€”`. PushNotifications retained only32 JPEGs in memory for2hours. The app
+ignored the exact JPEG iOS already attached to the notification. The malformed
+dash originated in a BOM-less UTF-8 sequence read through Windows PowerShell's
+ANSI default; saved notification history confirmed the November5 labels were
+damaged while prior nights were intact.
+
+Gateway0.4.33 retains up to512 notification JPEGs on private disk for7days,
+with atomic private metadata and the original capability key restored on restart.
+No extra upstream calls. History and future APNs titles repair recognizable
+lossless CP1252/UTF-8 mojibake. Existing expired in-memory images are not recreated.
+The phone now reads security-scoped notification attachments first, retains
+bounded small JPEGs locally, then tries the original allowed HTTPS URL. Old
+payload titles are repaired locally. The bounded attachment copy precedes the main-thread response completion;
+network work follows completion; late attachment recovery is revision guarded.
+
+39 service tests and11 isolated deployed-baseline notification tests passed.
+Swift6 cache/URL/encoding checks cover restart, overnight retention, expiry,
+limits, attachments and path safety. Signed phone build2026110602 installed
+in place on communicator; installed version independently read back. Build0601
+launched successfully; the final0602 automatic launch was blocked when the phone
+auto-locked again. No real APNs test sent; Kevin's real old-notification tap remains to be
+confirmed. The source notification crash fix and other local edits were retained.
+
+Deployment used an isolated copy of the running gateway baseline, verified by
+portable PDB source hashes (Program and SurveyFraming match HEAD, not pending
+local changes). RecordingReplay's decompiled compiled type is byte-identical
+between the existing production DLL and current compiled source; that source
+was retained. Core.dll and runtime8.0.29 are byte-identical/config-identical.
+A separate Linux HTTP fixture verified a12-hour-old image, original URL after
+restart, wrong-key404, and repaired historical title with no observatory bridge
+or real APNs. Only Service.dll/PDB/deps were deployed; current web assets,
+configuration, recorderPID176268, NINA session, equipment and stopped state
+were unchanged. GatewayPID308294, doctor0.4.33.0, fresh bridge verified.
+Rollback: ~/.local/share/starfront-web/backups/notifications-20261106.
+Service DLL SHA256 c04301365444d9618507ca6c24cd928774c1456d00fd9bce4cb3de539755e74a.
+Local evidence: Operations/.codex-artifacts/2026-11-06-notification-fix.
+
+## November 6 — gentler notification previews deployed
+
+Kevin approved a darker, less aggressive notification stretch, preserving original
+images and capture settings. Gateway0.4.34 applies a bounded midtones curve only
+to notification JPEG copies:20% maps to8%, with endpoints0/255 preserved and
+no additional shadow clipping. This backs off the existing display stretch;
+it cannot recover detail already quantized into the source dashboard JPEG.
+SkiaSharp3.119.4 decodes only JPEGs at most100KB/800px per dimension and encodes
+bounded output. The once-per-fresh-preview worker does no upstream polling,
+FITS access, denoising or capture modification. Dashboard previews stay unchanged.
+Existing notification JPEGs retain their bytes and capability links.
+
+44 service tests and16 isolated-baseline tests passed, including pushed-snapshot
+consumer routing, darker background/noise range, preserved endpoints and input,
+dimension/byte rejection and persisted notification recovery. A prior real Veil
+JPEG comparison (480x320) changed median58 to24/255, p10/p90=44/82 to18/36;
+the exact Linux native renderer produced the same measurements. Linux HTTP
+fixture confirmed overnight retention/restart, title repair and wrong-key404.
+No real APNs test was sent; new notification appearance on the phone is pending.
+
+Deployed only Service.dll/PDB/deps plus SkiaSharp.dll/libSkiaSharp.so from the
+isolated running baseline. GatewayPID308711, doctor0.4.34.0 and fresh bridge
+verified. No NINA restart; session532263e6-a5a2-4e63-85f4-c297246df558,
+sequence editing state, camera settings/connections/cooler and recorderPID176268
+unchanged. Hashes verified all unrelated service files, configuration and existing
+media unchanged. This task read no science FITS and issued no equipment commands.
+Rollback: ~/.local/share/starfront-web/backups/notification-stretch-20261106.
+Evidence/comparison: Operations/.codex-artifacts/2026-11-06-notification-stretch.
+
+The Operations UTF-8 sequence reader and nightly planning skill now explicitly
+preserve raw UTF-8 bytes; actual Windows round-trip, digest and Unicode checks
+passed. Historical sequence files were not rewritten.
+
+
+## November 6 — historical notification appearance on iPhone
+
+Kevin requested last night's previews with the gentler curve on his phone.
+The gateway Media index has zero historical JPEGs (expired before durable-cache
+rollout); the phone retains two cached JPEGs whose hashed IDs match M31F
+2026-11-06T03:46:08Z and M31B07:01:31Z. New iOS build2026110603 applies the same
+20%→8% midtones curve on display for previews preceding2026-11-06T15:41Z, using
+event time or delivery time until history loads. New server-toned previews skip
+this migration. Original attachment/cache bytes are preserved. Notification-center
+thumbnails themselves remain immutable; tapping opens the revised app image.
+Missing server/attachment/cache images cannot be recreated by this display change.
+
+Swift6 date/URL and bounded ImageIO render checks passed. Real cached backgrounds
+60→25 and58→24/255, source bytes unchanged. Signed iPhone build succeeded, installed
+in place and launched on communicator; installed build independently read back.
+No real APNs test, gateway restart, NINA restart or equipment command. Kevin's
+next tap remains the on-phone appearance confirmation. Evidence in Operations
+.codex-artifacts/2026-11-06-historical-previews.
+
+## November 20 — deadline-aware safety recovery
+
+Starfront Control 0.4.33.0 adds **Wait Until Safe or Deadline** to the native
+Advanced Sequencer. Set the cutoff to the planned local end of imaging with
+its explicit UTC offset, for example `2026-11-20T05:45:46-06:00`. Use the
+observing night's cutoff date even when the observation begins the evening
+before. A disconnected safety monitor keeps the instruction waiting.
+
+Within the Unsafe handler, place the existing safety-gated recovery steps
+inside the new container. Only a Safe reading before the cutoff opens that
+container. At the cutoff the container completes and its recovery steps are
+skipped. Keep the same cutoff on the enclosing imaging group and the
+shutdown outside that group so the normal sequencer advances to shutdown
+without entering another imaging block. Existing saved sequences may still
+use the previous wait until their recovery block is updated.
+
+Core tests cover timestamp parsing, Safe before cutoff, a continuously Unsafe
+monitor, cancellation, and deadline priority when the monitor is already Safe.
